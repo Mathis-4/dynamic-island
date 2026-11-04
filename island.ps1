@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.11'
+$Version = '4.12'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -40,6 +40,8 @@ function Restart-Island {
 # En cas d'échec au démarrage : retour automatique à la version précédente
 function Fail($what, $err) {
   Log "ÉCHEC ($what) : $err"
+  # gardé à part : le journal est effacé au redémarrage de la version de secours
+  try { Add-Content -Path (Join-Path $Here 'echecs.log') -Value ("{0:dd/MM HH:mm:ss} v{1} ({2}) : {3}" -f (Get-Date), $Version, $what, $err) -Encoding UTF8 } catch {}
   $bak = Join-Path $Here 'island.ps1.bak'
   if ((Test-Path $bak) -and -not $env:ISLAND_ROLLBACK) {
     Add-Content -Path $SkipPath -Value $Version
@@ -842,7 +844,7 @@ namespace Island {
       if (now >= nextLook) {
         Random rnd = new Random();
         // les pupilles bougent dans le masque (lecture de gauche à droite quand il travaille)
-        double[] xs = new[] { -2, 0, 0, 2 };
+        double[] xs = new double[] { -2.0, 0.0, 0.0, 2.0 };
         double x = busy ? (((TranslateTransform)E<UIElement>("CPupils").RenderTransform).X > 0 ? -2 : 2) : xs[rnd.Next(xs.Length)];
         foreach (string e in new[] { "CPupils", "PkPupils", "NPupils" })
           Anim((TranslateTransform)E<UIElement>(e).RenderTransform, TranslateTransform.XProperty, x * (e == "NPupils" ? 1.6 : (e == "PkPupils" ? 0.7 : 1)), 280, 0, Quint());
