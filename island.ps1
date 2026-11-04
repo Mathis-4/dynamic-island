@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.15'
+$Version = '4.16'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -540,6 +540,15 @@ namespace Island {
           sc.BeginAnimation(ScaleTransform.ScaleXProperty, null); sc.BeginAnimation(ScaleTransform.ScaleYProperty, null);
           sc.ScaleX = 0.9; sc.ScaleY = 0.9;
           Anim(l, UIElement.OpacityProperty, 1, 200, 45, null);
+          // passe du flou au net en même temps que la forme grandit, puis l'effet est retiré (aucun coût ensuite)
+          BlurEffect blur = new BlurEffect(); blur.Radius = 7; blur.RenderingBias = RenderingBias.Performance;
+          l.Effect = blur;
+          DoubleAnimation ba = new DoubleAnimation(0, TimeSpan.FromMilliseconds(240));
+          ba.BeginTime = TimeSpan.FromMilliseconds(30);
+          ba.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
+          FrameworkElement target = l;
+          ba.Completed += delegate { if (target.Effect == blur) target.Effect = null; };
+          blur.BeginAnimation(BlurEffect.RadiusProperty, ba);
           Anim(sc, ScaleTransform.ScaleXProperty, 1, 420, 20, Back(0.35));
           Anim(sc, ScaleTransform.ScaleYProperty, 1, 420, 20, Back(0.35));
         } else {
@@ -574,7 +583,36 @@ namespace Island {
         else if (timerEnd.HasValue) ShowPage("PgTimer", 0);
         else ShowPage(PageList()[0], 0);   // rien ne joue : Nox d'abord
       }
+      bool fly = on && page == "PgMusic" && Playing() && layer == "Compact";
       Refresh();
+      if (fly) Safe("pochette", FlyArt);
+    }
+
+    // la petite pochette glisse et grandit jusqu'à sa place dans la vue ouverte
+    void FlyArt() {
+      Border from = E<Border>("CArtBox"), to = E<Border>("EArtBox"), fl = E<Border>("Flyer");
+      if (from.Visibility != Visibility.Visible || !(from.Background is ImageBrush)) return;
+      expanded.UpdateLayout();
+      Point a = from.TranslatePoint(new Point(0, 0), compact), b = to.TranslatePoint(new Point(0, 0), expanded);
+      double ax = Canvas.GetLeft(compact) + a.X, ay = a.Y, bx = Canvas.GetLeft(expanded) + b.X, by = b.Y;
+      if (double.IsNaN(ax) || double.IsNaN(bx)) return;
+      fl.Background = from.Background;
+      fl.Visibility = Visibility.Visible;
+      to.BeginAnimation(UIElement.OpacityProperty, null); to.Opacity = 0;
+      IEasingFunction e = new QuinticEase { EasingMode = EasingMode.EaseOut };
+      int ms = 420;
+      DoubleAnimation ml = new DoubleAnimation(ax, bx, TimeSpan.FromMilliseconds(ms)); ml.EasingFunction = e;
+      DoubleAnimation mt = new DoubleAnimation(ay, by, TimeSpan.FromMilliseconds(ms)); mt.EasingFunction = e;
+      DoubleAnimation mw = new DoubleAnimation(from.ActualWidth, to.ActualWidth, TimeSpan.FromMilliseconds(ms)); mw.EasingFunction = e;
+      DoubleAnimation mh = new DoubleAnimation(from.ActualHeight, to.ActualHeight, TimeSpan.FromMilliseconds(ms)); mh.EasingFunction = e;
+      mw.Completed += delegate {
+        fl.Visibility = Visibility.Collapsed;
+        fl.BeginAnimation(Canvas.LeftProperty, null); fl.BeginAnimation(Canvas.TopProperty, null);
+        fl.BeginAnimation(FrameworkElement.WidthProperty, null); fl.BeginAnimation(FrameworkElement.HeightProperty, null);
+        to.Opacity = 1;
+      };
+      fl.BeginAnimation(Canvas.LeftProperty, ml); fl.BeginAnimation(Canvas.TopProperty, mt);
+      fl.BeginAnimation(FrameworkElement.WidthProperty, mw); fl.BeginAnimation(FrameworkElement.HeightProperty, mh);
     }
     void StartTyping() {
       if (typing) return;
@@ -2070,6 +2108,9 @@ $workers = @(
 
         </DockPanel>
       </Border>
+
+      <!-- pochette qui « voyage » de la pilule réduite vers la vue ouverte -->
+      <Border x:Name="Flyer" Visibility="Collapsed" CornerRadius="9" IsHitTestVisible="False"/>
     </Canvas>
   </Canvas>
 </Window>
