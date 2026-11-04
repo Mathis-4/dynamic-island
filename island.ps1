@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.27'
+$Version = '4.28'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -703,8 +703,8 @@ namespace Island {
     double vol = -2; bool muted = false; int battPct = 100; bool? power = null; bool lowWarned = false;
     string noxMsgId = null; bool noxSeen = false; string noxState = "";
     double wheelAcc = 0; int tickN = 0;
-    string[] pageNames = { "PgMusic", "PgTimer", "PgNox", "PgToday", "PgAgenda" };
-    string[] tabNames = { "TabMusic", "TabTimer", "TabNox", "TabToday", "TabAgenda" };
+    string[] pageNames = { "PgMusic", "PgTimer", "PgNox", "PgToday", "PgAgenda", "PgHouse", "PgTools" };
+    string[] tabNames = { "TabMusic", "TabTimer", "TabNox", "TabToday", "TabAgenda", "TabHouse", "TabTools" };
     System.Globalization.CultureInfo fr = System.Globalization.CultureInfo.GetCultureInfo("fr-FR");
 
     public App(Window w, Hashtable s, Hashtable c) {
@@ -849,7 +849,7 @@ namespace Island {
       tick = new DispatcherTimer(DispatcherPriority.Background, win.Dispatcher);
       tick.Interval = TimeSpan.FromMilliseconds(100);
       tick.Tick += delegate { Safe("cycle", Tick); };
-      UpdateBattery(); UpdateTimer(); ShowPage("PgNox", 0);
+      UpdateBattery(); UpdateTimer(); Safe("raccourcis", BuildTools); Safe("maison", delegate { UpdateHouse(null); }); ShowPage("PgNox", 0);
       tick.Start();
       Log("interface prête (code compilé)");
     }
@@ -1010,8 +1010,7 @@ namespace Island {
       if (on) {
         bool playing = Playing();
         if (DateTime.Now < peekUntil && (peekIsConfirm || E<TextBlock>("PApp").Text == "Nox")) { peekUntil = DateTime.MinValue; ShowPage("PgNox", 0); }
-        else if (playing) ShowPage("PgMusic", 0);
-        else ShowPage(PageList()[0], 0);   // rien ne joue : Nox d'abord
+        else ShowPage("PgNox", 0);   // on arrive toujours sur Nox, au milieu
       }
       bool fly = on && page == "PgMusic" && Playing() && layer == "Compact";
       Refresh();
@@ -1080,10 +1079,8 @@ namespace Island {
     // ---------------- pages ----------------
     List<string> PageList() {
       List<string> l = new List<string>();
-      // musique en cours : Musique puis Nox ; sinon Nox en premier
-      if (Playing()) { l.Add("PgMusic"); l.Add("PgNox"); }
-      else { l.Add("PgNox"); l.Add("PgMusic"); }   // l'onglet Musique reste là pour lancer Spotify
-      l.Add("PgAgenda");   // Minuteur et Aujourd'hui retirés (demande de Mathis), remplacés par l'agenda
+      // ordre fixe, Nox au milieu (demande de Mathis) : un geste à gauche ou à droite suffit
+      l.Add("PgMusic"); l.Add("PgAgenda"); l.Add("PgNox"); l.Add("PgHouse"); l.Add("PgTools");
       return l;
     }
     void GoPage(string p) {
@@ -1122,6 +1119,7 @@ namespace Island {
       if (name != page && expandedOn) holdUntil = DateTime.Now.AddMilliseconds(1600);
       page = name;
       if (name == "PgNox" && expandedOn) noxUnread = false;
+      sync["houseWanted"] = name == "PgHouse" && expandedOn;
       List<string> l = PageList();
       string order = string.Join(",", l.ToArray());
       if (order != tabOrder) {   // remet les onglets dans le même ordre que les pages
@@ -1250,7 +1248,7 @@ namespace Island {
         if (!l.Contains(page)) ShowPage(l[0], 0);
         else if (string.Join(",", l.ToArray()) != tabOrder) ShowPage(page, 0);
         // la vue ne rétrécit pas tant que la souris est dessus (sinon elle se refermerait sous le curseur)
-        string ek = page + "|" + agendaRev + "|" + VisKey("NConfirm") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
+        string ek = page + "|" + agendaRev + "|" + houseRev + "|" + VisKey("NConfirm") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
         if (ek != expKey) { expKey = ek; expanded.Height = double.NaN; expNatural = Math.Ceiling(Natural(expanded, 440).Height); }
         stickyH = expNatural;   // chaque widget a sa hauteur (plus de vide) ; un délai de grâce évite la fermeture sous le curseur
         expanded.Height = stickyH;
@@ -1826,6 +1824,7 @@ namespace Island {
       E<UIElement>("CEyes").Opacity = state == "off" ? 0.55 : 1;
       if (n == null || !Bool(G(n, "ok"))) { Vis("NConfirm", false); return; }
       Safe("agenda", delegate { UpdateAgenda(G(n, "week") as IEnumerable); });
+      Safe("maison", delegate { UpdateHouse(G(n, "house") as Hashtable); });
       Hashtable wd = G(n, "widget") as Hashtable;
       if (wd != null) {
         Hashtable me = G(wd, "meteo") as Hashtable;
@@ -1967,6 +1966,103 @@ namespace Island {
       }
       Refresh();
     }
+
+    // ---------------- Maison ----------------
+    string houseKey = ""; int houseRev = 0;
+    readonly string[][] Routines = { new[] { "je_pars", "Je pars", "\uE7E8" }, new[] { "je_rentre", "Je rentre", "\uE80F" },
+                                     new[] { "bonne_nuit", "Bonne nuit", "\uE708" }, new[] { "tout_eteindre", "Tout éteindre", "\uEA80" } };
+    Border Tile(string icon, string label, string sub, bool on, MouseButtonEventHandler click) {
+      StackPanel sp = new StackPanel(); sp.Orientation = Orientation.Horizontal;
+      TextBlock ic = new TextBlock(); ic.Text = icon; ic.FontFamily = new FontFamily("Segoe Fluent Icons"); ic.FontSize = 14; ic.VerticalAlignment = VerticalAlignment.Center;
+      ic.Foreground = on ? Br("#FFD60A") : Br("#C7C7CC");
+      StackPanel tx = new StackPanel(); tx.Margin = new Thickness(8, 0, 0, 0);
+      TextBlock a = new TextBlock(); a.Text = label; a.FontSize = 12.5; a.FontWeight = FontWeights.SemiBold; a.TextTrimming = TextTrimming.CharacterEllipsis;
+      tx.Children.Add(a);
+      if (!string.IsNullOrEmpty(sub)) { TextBlock b = new TextBlock(); b.Text = sub; b.FontSize = 11; b.Foreground = Br("#AEAEB2"); tx.Children.Add(b); }
+      sp.Children.Add(ic); sp.Children.Add(tx);
+      Border t = new Border(); t.Child = sp; t.CornerRadius = new CornerRadius(12); t.Padding = new Thickness(10, 7, 8, 7); t.Margin = new Thickness(0, 0, 6, 6);
+      t.Background = on ? Br("#30FFD60A") : Br("#16FFFFFF"); t.Cursor = Cursors.Hand;
+      t.MouseLeftButtonUp += click;
+      return t;
+    }
+    void UpdateHouse(Hashtable h) {
+      Panel routines = E<Panel>("HRoutines");
+      if (routines.Children.Count == 0) {
+        foreach (string[] r in Routines) {
+          string nom = r[0], lib = r[1];
+          Border chip = new Border(); chip.CornerRadius = new CornerRadius(13); chip.Padding = new Thickness(11, 5, 11, 5); chip.Margin = new Thickness(0, 0, 6, 0);
+          chip.Background = Br("#1AFFFFFF"); chip.Cursor = Cursors.Hand;
+          StackPanel sp = new StackPanel(); sp.Orientation = Orientation.Horizontal;
+          TextBlock ic = new TextBlock(); ic.Text = r[2]; ic.FontFamily = new FontFamily("Segoe Fluent Icons"); ic.FontSize = 11; ic.VerticalAlignment = VerticalAlignment.Center;
+          TextBlock t = new TextBlock(); t.Text = lib; t.FontSize = 12; t.Margin = new Thickness(6, 0, 0, 0);
+          sp.Children.Add(ic); sp.Children.Add(t); chip.Child = sp;
+          chip.MouseLeftButtonUp += delegate {
+            NoxCmd("house:routine:" + nom);
+            ShowToast("\uE80F", lib + " : c'est parti", "", Rgb("#FFD60A"), -1, 1800); Refresh();
+          };
+          routines.Children.Add(chip);
+        }
+      }
+      if (h == null) return;
+      IEnumerable rooms = G(h, "pieces") as IEnumerable;
+      List<Hashtable> list = new List<Hashtable>();
+      string key = Str(G(h, "allumees")) + "/" + Str(G(h, "total")) + "|";
+      if (rooms != null && !(rooms is string)) foreach (object o in rooms) { Hashtable p = U(o) as Hashtable; if (p != null) { list.Add(p); key += Str(G(p, "nom")) + Bool(G(p, "allumee")) + Str(G(p, "lum")) + ";"; } }
+      E<TextBlock>("HSummary").Text = Str(G(h, "total")).Length > 0 ? Str(G(h, "allumees")) + " / " + Str(G(h, "total")) + " lampes allumées" : "";
+      if (key == houseKey) return;
+      houseKey = key; houseRev++;
+      Panel grid = E<Panel>("HRooms"); grid.Children.Clear();
+      foreach (Hashtable p in list) {
+        if (grid.Children.Count == 6) break;
+        string groupe = Str(G(p, "groupe")), nom = Str(G(p, "nom"));
+        bool on = Bool(G(p, "allumee"));
+        string sub = on ? (Str(G(p, "lum")).Length > 0 ? Str(G(p, "lum")) + " %" : "allumée") : "éteinte";
+        Border tile = null;
+        tile = Tile(on ? "\uEA80" : "\uE781", nom, sub, on, delegate {
+          NoxCmd("house:piece:" + groupe + ":" + (on ? "0" : "1"));
+          tile.Opacity = 0.55;   // en cours… l'état réel revient quelques secondes après
+        });
+        grid.Children.Add(tile);
+      }
+      Vis("HEmpty", list.Count == 0);
+      if (list.Count == 0) E<TextBlock>("HEmpty").Text = "Pas de lumières trouvées (Hue indisponible ?)";
+    }
+
+    // ---------------- Raccourcis Windows ----------------
+    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, int flags, IntPtr extra);
+    [DllImport("user32.dll")] static extern bool LockWorkStation();
+    static void Keys(params byte[] vks) {
+      foreach (byte k in vks) keybd_event(k, 0, 0, IntPtr.Zero);
+      for (int i = vks.Length - 1; i >= 0; i--) keybd_event(vks[i], 0, 2, IntPtr.Zero);
+    }
+    void BuildTools() {
+      Panel g = E<Panel>("PgTools");
+      if (g.Children.Count > 0) return;
+      object[][] tools = {
+        new object[] { "\uE924", "Capture", new Action(delegate { Run("ms-screenclip:"); }) },
+        new object[] { "\uE77F", "Presse-papiers", new Action(delegate { Keys(0x5B, 0x56); }) },
+        new object[] { "\uE7F4", "Bureau", new Action(delegate { Keys(0x5B, 0x44); }) },
+        new object[] { "\uEC50", "Explorateur", new Action(delegate { Run("explorer.exe"); }) },
+        new object[] { "\uE74F", "Couper le son", new Action(delegate { Keys(0xAD); }) },
+        new object[] { "\uE72E", "Verrouiller", new Action(delegate { LockWorkStation(); }) },
+        new object[] { "\uE9D9", "Gestionnaire", new Action(delegate { Run("taskmgr.exe"); }) },
+        new object[] { "\uE713", "Paramètres", new Action(delegate { Run("ms-settings:"); }) } };
+      foreach (object[] t in tools) {
+        Action act = (Action)t[2];
+        StackPanel sp = new StackPanel(); sp.HorizontalAlignment = HorizontalAlignment.Center;
+        Border ic = new Border(); ic.Width = 40; ic.Height = 40; ic.CornerRadius = new CornerRadius(12); ic.Background = Br("#1FFFFFFF");
+        TextBlock gl = new TextBlock(); gl.Text = (string)t[0]; gl.FontFamily = new FontFamily("Segoe Fluent Icons"); gl.FontSize = 16;
+        gl.HorizontalAlignment = HorizontalAlignment.Center; gl.VerticalAlignment = VerticalAlignment.Center; ic.Child = gl;
+        TextBlock lb = new TextBlock(); lb.Text = (string)t[1]; lb.FontSize = 11; lb.Foreground = Br("#C7C7CC"); lb.HorizontalAlignment = HorizontalAlignment.Center; lb.Margin = new Thickness(0, 4, 0, 8);
+        sp.Children.Add(ic); sp.Children.Add(lb);
+        Border cell = new Border(); cell.Child = sp; cell.Background = Brushes.Transparent; cell.Cursor = Cursors.Hand;
+        cell.MouseEnter += delegate { ic.Background = Br("#33FFFFFF"); };
+        cell.MouseLeave += delegate { ic.Background = Br("#1FFFFFFF"); };
+        cell.MouseLeftButtonUp += delegate { try { act(); } catch (Exception ex) { Log("raccourci : " + ex.Message); } };
+        g.Children.Add(cell);
+      }
+    }
+    void Run(string what) { System.Diagnostics.Process.Start(what); }
 
     // ---------------- Agenda ----------------
     List<Hashtable> week = new List<Hashtable>();
@@ -2383,7 +2479,7 @@ $noxScript = {
 
   $state = @{ ok = $false; state = 'nourl'; error = 'recherche de Nox…' }
   $sync.nox = $state.Clone()
-  $nextFind = [DateTime]::MinValue; $nextEquipe = [DateTime]::MinValue; $nextWidget = [DateTime]::MinValue; $nextWeek = [DateTime]::MinValue
+  $nextFind = [DateTime]::MinValue; $nextEquipe = [DateTime]::MinValue; $nextWidget = [DateTime]::MinValue; $nextWeek = [DateTime]::MinValue; $nextHouse = [DateTime]::Now.AddSeconds(5); $houseWas = $false
   $pouls = $null; $f = ''; $needConv = $true; $lastErr = ''; $pending = @()
 
   while (-not $sync.stop) {
@@ -2414,6 +2510,13 @@ $noxScript = {
           $pending += Post-Json '/api/conversation/bouton' @{ id = $parts[0]; action = $parts[1] }
           NLog 'bouton de Nox'
         }
+        elseif ($c -like 'house:*') {
+          $parts = $c.Split(':', 4)
+          if ($parts[1] -eq 'routine') { $pending += Post-Json '/api/lumiere' @{ action = 'routine'; nom = $parts[2]; leger = $true } }
+          else { $pending += Post-Json '/api/lumiere' @{ action = 'piece'; groupe = $parts[2]; allumer = ($parts[3] -eq '1'); leger = $true } }
+          $nextHouse = [DateTime]::Now.AddSeconds(1.5)
+          NLog ("maison : " + $parts[1] + ' ' + $parts[2])
+        }
         elseif ($c -like 'send:*') { $pending += Post-Json '/api/conversation' @{ texte = $c.Substring(5) }; NLog 'message envoyé à Nox' }
         elseif ($c -like 'confirm:*') {
           $parts = $c.Split(':', 3)
@@ -2442,6 +2545,20 @@ $noxScript = {
           $state.widget = @{ meteo = $me; agenda = @($w.agenda_liste | Where-Object { $_ } | ForEach-Object { [string]$_ }) }
         } catch { NLog ("widget : " + $_.Exception.Message) }
       }
+      # lumières (onglet Maison) : toutes les 4 s quand l'onglet est ouvert, sinon toutes les 2 min
+      if ([DateTime]::Now -ge $nextHouse) {
+        $nextHouse = [DateTime]::Now.AddSeconds($(if ($sync.houseWanted) { 4 } else { 120 }))
+        try {
+          $et = Get-Json '/api/etat' 25000
+          $l = $et.lumieres
+          if ($l -and -not $l.erreur) {
+            $state.house = @{ allumees = [string]$l.allumees; total = [string]$l.total
+              pieces = @(@($l.pieces) | Where-Object { $_ } | ForEach-Object { @{ groupe = [string]$_.groupe; nom = [string]$_.nom; allumee = [bool]$_.allumee; lum = [string]$_.luminosite } }) }
+          }
+        } catch { NLog ("maison : " + $_.Exception.Message) }
+      }
+      if ($sync.houseWanted -and -not $houseWas) { $nextHouse = [DateTime]::Now }
+      $houseWas = [bool]$sync.houseWanted
       # agenda des 7 prochains jours (onglet Agenda), toutes les 10 min
       if ([DateTime]::Now -ge $nextWeek) {
         $nextWeek = [DateTime]::Now.AddMinutes(10)
@@ -2571,7 +2688,7 @@ $workers = @(
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border Background="{TemplateBinding Background}" CornerRadius="11" Padding="10,4">
+            <Border Background="{TemplateBinding Background}" CornerRadius="11" Padding="8,4">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
           </ControlTemplate>
@@ -2748,6 +2865,18 @@ $workers = @(
                 <TextBlock Text="Nox" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
               </StackPanel>
             </Button>
+            <Button x:Name="TabHouse" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE80F;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Maison" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
+            <Button x:Name="TabTools" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE8A9;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Raccourcis" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
             <Button x:Name="TabAgenda" Style="{StaticResource Tab}">
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="&#xE787;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -2887,6 +3016,20 @@ $workers = @(
                 </DockPanel>
               </Border>
             </StackPanel>
+
+            <!-- Maison : routines et pièces (lumières Hue, par Nox) -->
+            <StackPanel x:Name="PgHouse" Visibility="Collapsed">
+              <DockPanel Margin="2,0,0,8">
+                <TextBlock x:Name="HSummary" DockPanel.Dock="Right" FontSize="12" Foreground="#8E8E93"/>
+                <TextBlock Text="Maison" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="15"/>
+              </DockPanel>
+              <WrapPanel x:Name="HRoutines" Margin="0,0,0,10"/>
+              <UniformGrid x:Name="HRooms" Columns="3"/>
+              <TextBlock x:Name="HEmpty" Text="Les lumières arrivent…" FontSize="12.5" Foreground="#8E8E93" Margin="2,2,0,2"/>
+            </StackPanel>
+
+            <!-- Raccourcis Windows -->
+            <UniformGrid x:Name="PgTools" Visibility="Collapsed" Columns="4"/>
 
             <!-- Agenda : les 7 prochains jours, puis les rendez-vous du jour choisi -->
             <StackPanel x:Name="PgAgenda" Visibility="Collapsed">
