@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.24'
+$Version = '4.25'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -945,24 +945,25 @@ namespace Island {
       // teinte du bas : pochette quand ça joue, violet de Nox sinon
       Color col = accentDefault; double level;
       // teinte légère (avis design : la bande saturée faisait « défaut d'affichage »)
-      if (hasMedia && (playing || name == "Expanded")) { col = accent; level = name == "Compact" ? 0.14 : 0.3; }
+      if (playing) { col = accent; level = name == "Compact" ? 0.14 : 0.3; }   // musique en pause = ambiance du moment
       else level = name == "Compact" ? 0.08 : (name == "Expanded" ? 0.18 : 0.08);
       // sans musique : ambiance du moment de la journée (et de Nox), même style que la pochette
       string palKey = PaletteKey(now);
-      if (!hasMedia) col = PaletteMain(palKey);
-      string ambKey = hasMedia ? "art:" + trackKey : "pal:" + palKey;
-      if (ambKey != ambShown) { ambShown = ambKey; Safe("ambiance", delegate { E<Image>("AmbImg").Source = hasMedia ? artTiny : PaletteBitmap(palKey); }); tintKey = ""; }
+      bool useArt = playing && artTiny != null;
+      if (!playing) col = PaletteMain(palKey);
+      string ambKey = useArt ? "art:" + trackKey : "pal:" + palKey;
+      if (ambKey != ambShown) { ambShown = ambKey; Safe("ambiance", delegate { E<Image>("AmbImg").Source = useArt ? artTiny : PaletteBitmap(palKey); }); tintKey = ""; }
       string tk = level + "|" + col + "|" + ambKey;
       if (tk != tintKey) {
         tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450);
         // liseré coloré seulement pendant la musique ; plus marqué quand la pilule est ouverte
-        bool edge = hasMedia ? (playing || name == "Expanded") : name == "Expanded";
-        byte alpha = (byte)(edge ? (name == "Compact" ? 200 : (hasMedia ? 240 : 170)) : 0);
+        bool edge = playing || name == "Expanded";
+        byte alpha = (byte)(edge ? (name == "Compact" ? 200 : (playing ? 240 : 170)) : 0);
         // couleur éclaircie (35 % vers le blanc) pour se détacher de la teinte du fond
         Color lc = Color.FromRgb((byte)(col.R + (255 - col.R) * 0.45), (byte)(col.G + (255 - col.G) * 0.45), (byte)(col.B + (255 - col.B) * 0.45));
         AnimColor(edgeMid, GradientStop.ColorProperty, Color.FromArgb((byte)(alpha * 0.35), lc.R, lc.G, lc.B), 500);
         // le fond vivant remplace la teinte du bas dans la vue ouverte
-        bool amb = name == "Expanded" && (hasMedia ? ambReady : true);
+        bool amb = name == "Expanded";
         Anim(E<UIElement>("Amb"), UIElement.OpacityProperty, amb ? 1 : 0, amb ? 500 : 200, 0, null);
         if (amb) AnimColor(tintStop, GradientStop.ColorProperty, Colors.Black, 300);
         SetAmbDrift(amb);
@@ -1391,7 +1392,7 @@ namespace Island {
       if (msg != null) {
         string id = Str(G(msg, "id")), txt = Str(G(msg, "texte"));
         E<TextBlock>("NLast").Text = txt;
-        E<TextBlock>("NLastTime").Text = Str(G(msg, "heure"));
+        E<TextBlock>("NLastTime").Text = NiceTime(Str(G(msg, "heure")));
         Vis("NLastBox", txt.Length > 0);
         SetNoxButtons(id, G(msg, "boutons") as IEnumerable);
         if (id != noxMsgId) {
@@ -1606,6 +1607,15 @@ namespace Island {
         }
         list.Children.Add(row);
       }
+    }
+
+    // « 2026-11-04T20:22:09+01:00 » -> « Aujourd'hui · 20:22 »
+    string NiceTime(string iso) {
+      DateTimeOffset d;
+      if (!DateTimeOffset.TryParse(iso, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out d)) return iso;
+      DateTime l = d.LocalDateTime;
+      string jour = l.Date == DateTime.Today ? "Aujourd'hui" : (l.Date == DateTime.Today.AddDays(-1) ? "Hier" : l.ToString("ddd d MMM", fr).Replace(".", ""));
+      return jour + " · " + l.ToString("HH:mm");
     }
 
     void Confirm(bool yes) {
