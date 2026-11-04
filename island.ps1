@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.23'
+$Version = '4.24'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -947,17 +947,22 @@ namespace Island {
       // teinte légère (avis design : la bande saturée faisait « défaut d'affichage »)
       if (hasMedia && (playing || name == "Expanded")) { col = accent; level = name == "Compact" ? 0.14 : 0.3; }
       else level = name == "Compact" ? 0.08 : (name == "Expanded" ? 0.18 : 0.08);
-      string tk = level + "|" + col;
+      // sans musique : ambiance du moment de la journée (et de Nox), même style que la pochette
+      string palKey = PaletteKey(now);
+      if (!hasMedia) col = PaletteMain(palKey);
+      string ambKey = hasMedia ? "art:" + trackKey : "pal:" + palKey;
+      if (ambKey != ambShown) { ambShown = ambKey; Safe("ambiance", delegate { E<Image>("AmbImg").Source = hasMedia ? artTiny : PaletteBitmap(palKey); }); tintKey = ""; }
+      string tk = level + "|" + col + "|" + ambKey;
       if (tk != tintKey) {
         tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450);
         // liseré coloré seulement pendant la musique ; plus marqué quand la pilule est ouverte
-        bool edge = hasMedia && (playing || name == "Expanded");
-        byte alpha = (byte)(edge ? (name == "Compact" ? 200 : 240) : 0);
+        bool edge = hasMedia ? (playing || name == "Expanded") : name == "Expanded";
+        byte alpha = (byte)(edge ? (name == "Compact" ? 200 : (hasMedia ? 240 : 170)) : 0);
         // couleur éclaircie (35 % vers le blanc) pour se détacher de la teinte du fond
         Color lc = Color.FromRgb((byte)(col.R + (255 - col.R) * 0.45), (byte)(col.G + (255 - col.G) * 0.45), (byte)(col.B + (255 - col.B) * 0.45));
         AnimColor(edgeMid, GradientStop.ColorProperty, Color.FromArgb((byte)(alpha * 0.35), lc.R, lc.G, lc.B), 500);
         // le fond vivant remplace la teinte du bas dans la vue ouverte
-        bool amb = name == "Expanded" && hasMedia && ambReady;
+        bool amb = name == "Expanded" && (hasMedia ? ambReady : true);
         Anim(E<UIElement>("Amb"), UIElement.OpacityProperty, amb ? 1 : 0, amb ? 500 : 200, 0, null);
         if (amb) AnimColor(tintStop, GradientStop.ColorProperty, Colors.Black, 300);
         SetAmbDrift(amb);
@@ -1003,15 +1008,39 @@ namespace Island {
     }
 
     // ---------------- fond vivant (pochette) ----------------
-    bool ambReady, ambDrifting;
+    bool ambReady, ambDrifting; BitmapSource artTiny; string ambShown = "";
+    // moment de la journée + humeur de Nox -> palette
+    string PaletteKey(DateTime now) {
+      int hr = now.Hour;
+      string moment = hr >= 6 && hr < 11 ? "matin" : hr >= 11 && hr < 17 ? "jour" : hr >= 17 && hr < 21 ? "soir" : "nuit";
+      return moment + (noxState == "busy" ? "+nox" : "");
+    }
+    static Color[] PaletteColors(string key) {
+      Color[] p;
+      if (key.StartsWith("matin")) p = new[] { Rgb("#E8A87C"), Rgb("#F4EFE6"), Rgb("#849C8B"), Rgb("#D46F61") };   // aube : pêche, crème, sauge
+      else if (key.StartsWith("jour")) p = new[] { Rgb("#849C8B"), Rgb("#5FA8A0"), Rgb("#F4EFE6"), Rgb("#6F8877") };  // journée : sauge, eau, crème
+      else if (key.StartsWith("soir")) p = new[] { Rgb("#D46F61"), Rgb("#8B6FB8"), Rgb("#E8A87C"), Rgb("#4A3F6B") };  // soir : terracotta, violet
+      else p = new[] { Rgb("#3B3F7A"), Rgb("#5B6B9A"), Rgb("#2A2D4F"), Rgb("#849C8B") };                            // nuit : indigo, sauge
+      if (key.EndsWith("+nox")) p[1] = Rgb("#9C8BFF");   // Nox au travail : une touche de violet
+      return p;
+    }
+    static Color PaletteMain(string key) { return PaletteColors(key)[0]; }
+    static BitmapSource PaletteBitmap(string key) {
+      Color[] p = PaletteColors(key);
+      int[] grid = { 0, 0, 1, 1,  0, 2, 2, 1,  3, 2, 2, 0,  3, 3, 0, 1 };   // 4 x 4 : taches de couleurs, fondues une fois agrandies
+      byte[] px = new byte[16 * 4];
+      for (int i = 0; i < 16; i++) { Color c = p[grid[i]]; px[i * 4] = c.B; px[i * 4 + 1] = c.G; px[i * 4 + 2] = c.R; px[i * 4 + 3] = 255; }
+      BitmapSource b = BitmapSource.Create(4, 4, 96, 96, PixelFormats.Bgra32, null, px, 16);
+      b.Freeze(); return b;
+    }
     void SetAmbArt(ImageSource art) {
       BitmapSource src = art as BitmapSource;
       ambReady = false;
-      if (src == null || src.PixelWidth < 2) { E<Image>("AmbImg").Source = null; return; }
+      if (src == null || src.PixelWidth < 2) { artTiny = null; ambShown = ""; return; }
       // pochette réduite à 4 x 4 pixels : une fois agrandie, elle donne un dégradé doux de ses couleurs
       BitmapSource tiny = new TransformedBitmap(src, new ScaleTransform(4.0 / src.PixelWidth, 4.0 / src.PixelHeight));
       tiny.Freeze();
-      E<Image>("AmbImg").Source = tiny;
+      artTiny = tiny; ambShown = "";
       ambReady = true; tintKey = "";
     }
     void SetAmbDrift(bool on) {
