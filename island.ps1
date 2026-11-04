@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.5'
+$Version = '4.6'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -281,6 +281,10 @@ namespace Island {
     DateTime toastUntil = DateTime.MinValue, peekUntil = DateTime.MinValue, restartAt = DateTime.MinValue;
     DateTime nextBlink = DateTime.Now.AddSeconds(3), nextLook = DateTime.Now.AddSeconds(5), lastPage = DateTime.MinValue;
     string targetKey = "", tintKey = "", trackKey = "", marqueeText = null, page = "PgNox", tabOrder = "", compactKey = "", peekKey = "";
+    List<string> agendaItems = new List<string>();
+    HashSet<string> evPeeked = new HashSet<string>();
+    static readonly Color EventColor = Color.FromRgb(0x0A, 0x84, 0xFF);
+    bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
     DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
@@ -359,6 +363,14 @@ namespace Island {
       Click("BSend", delegate { SendNox(); });
       Click("BConfOk", delegate { Confirm(true); });
       Click("BConfNo", delegate { Confirm(false); });
+      Click("BMic", delegate {
+        string u = Str(G(sync, "noxUrl"));
+        if (u.Length == 0) { ShowPeek(null, "\uE720", "#FFFFFF", "#FF453A", "Nox", "Nox est introuvable", "Vérifie que Tailscale est lancé", 4000, false); Refresh(); return; }
+        try { System.Diagnostics.Process.Start(u + "/voix"); } catch (Exception ex) { Log("voix : " + ex.Message); }
+      });
+      // glisser un fichier sur la pilule : Nox propose où le ranger
+      win.AllowDrop = true;
+      win.DragEnter += OnDrag; win.DragOver += OnDrag; win.Drop += OnDrop;
       Click("BPeekOk", delegate { Confirm(true); peekUntil = DateTime.MinValue; Refresh(); });
       Click("BPeekNo", delegate { Confirm(false); peekUntil = DateTime.MinValue; Refresh(); });
       TextBox input = E<TextBox>("NInput");
@@ -670,6 +682,7 @@ namespace Island {
       Safe("volume", UpdateVolume);
       Safe("musique", UpdateMedia);
       if (tickN % 5 == 1) Safe("minuteur", UpdateTimer);
+      if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
       if (tickN % 10 == 1) {
         Safe("batterie", delegate { if (!ringIsTimer) UpdateBattery(); });
         Safe("nox", UpdateNox);
@@ -718,18 +731,34 @@ namespace Island {
         name = "Compact";
         bool music = playing;
         bool noxBusy = noxState == "busy";
+        string evTitle; double evMin;
+        bool ev = NextEvent(now, out evTitle, out evMin) && !timerOn;
         Vis("CArtBox", music); Vis("CTitleBox", music); Vis("CEq", music);
-        Vis("CRingBox", timerOn && !music);   // plus d'anneau de batterie (demande de Mathis) Vis("CTimer", timerOn && !music); Vis("CClock", !music && !timerOn); Vis("CEyes", !music);
+        // plus d'anneau de batterie (demande de Mathis) : l'anneau sert au minuteur et au prochain rendez-vous
+        Vis("CRingBox", (timerOn || ev) && !music); Vis("CTimer", timerOn && !music); Vis("CEvent", ev && !music);
+        Vis("CClock", !music && !timerOn && !ev); Vis("CEyes", !music);
+        Path ring = E<Path>("CRing");
         if (timerOn && !music) {
-          Path ring = E<Path>("CRing");
           ring.Stroke = Br(timerColor);
           ring.Data = Fx.Arc(17, 2.5, (timerEnd.Value - now).TotalSeconds / timerTotal);
-          ringIsTimer = true;
-        } else if (ringIsTimer) { ringIsTimer = false; UpdateBattery(); }
-        string ck = music + "|" + timerOn + "|" + clock + "|" + E<TextBlock>("CTimer").Text + "|" + E<FrameworkElement>("CTitleBox").Width;
+        } else if (ev && !music) {
+          ring.Stroke = Br(EventColor);
+          ring.Data = Fx.Arc(17, 2.5, Math.Max(0.001, evMin / 15.0));
+          string t = evTitle.Length > 22 ? evTitle.Substring(0, 21).TrimEnd() + "…" : evTitle;
+          E<TextBlock>("CEvent").Text = t + (evMin > 0.5 ? " · " + (int)Math.Ceiling(evMin) + " min" : " · maintenant");
+        }
+        string ck = music + "|" + timerOn + "|" + ev + "|" + clock + "|" + E<TextBlock>("CTimer").Text + "|" + E<TextBlock>("CEvent").Text + "|" + E<FrameworkElement>("CTitleBox").Width;
         if (ck != compactKey) { compactKey = ck; compactW = Math.Max(150, Math.Ceiling(Natural(compact, double.NaN).Width)); }
         w = compactW; h = 34; r = 16; resp = 0.34; damp = 0.86;
-        if (music && timerOn) { bub = 32; Vis("BRing", true); Vis("BEyes", false); }
+        if (music && timerOn) {
+          bub = 32; Vis("BRing", true); Vis("BEyes", false);
+          E<Path>("Ring").Stroke = Br(timerColor); E<TextBlock>("RingTxt").Foreground = Br(timerColor);
+        } else if (music && ev) {
+          bub = 32; Vis("BRing", true); Vis("BEyes", false);
+          E<Path>("Ring").Stroke = Br(EventColor); E<TextBlock>("RingTxt").Foreground = Br(EventColor);
+          E<Path>("Ring").Data = Fx.Arc(22, 2.5, Math.Max(0.001, evMin / 15.0));
+          E<TextBlock>("RingTxt").Text = evMin > 0.5 ? ((int)Math.Ceiling(evMin)).ToString() : "!";
+        }
         else if (music && noxBusy) { bub = 32; Vis("BRing", false); Vis("BEyes", true); }
       }
       SetEq(playing);
@@ -862,8 +891,6 @@ namespace Island {
       battPct = pct;
       string g = BattGlyph(pct, online);
       Color col = online ? chargeColor : (pct <= 20 ? Rgb("#FF453A") : Rgb("#F2F2F7"));
-      Path ring = E<Path>("CRing");
-      ring.Stroke = Br(col); ring.Data = Fx.Arc(17, 2.5, pct / 100.0);
       E<TextBlock>("EBattIco").Text = g; E<TextBlock>("EBattIco").Foreground = Br(col);
       E<TextBlock>("EBattTxt").Text = online ? pct + " % · en charge" : pct + " %";
       if (power.HasValue && power.Value != online)
@@ -1030,6 +1057,7 @@ namespace Island {
         IEnumerable ag = G(wd, "agenda") as IEnumerable;
         List<string> items = new List<string>();
         if (ag != null && !(ag is string)) foreach (object o in ag) if (o != null && items.Count < 2) items.Add(o.ToString());
+        agendaItems = items;
         E<TextBlock>("TAgenda1").Text = items.Count > 0 ? items[0] : "";
         E<TextBlock>("TAgenda2").Text = items.Count > 1 ? items[1] : "";
         Vis("TAgenda1", items.Count > 0); Vis("TAgenda2", items.Count > 1);
@@ -1042,6 +1070,7 @@ namespace Island {
         E<TextBlock>("NLast").Text = txt;
         E<TextBlock>("NLastTime").Text = Str(G(msg, "heure"));
         Vis("NLastBox", txt.Length > 0);
+        SetNoxButtons(id, G(msg, "boutons") as IEnumerable);
         if (id != noxMsgId) {
           bool first = !noxSeen;
           noxMsgId = id;
@@ -1078,6 +1107,89 @@ namespace Island {
       Vis("NLastBox", true);
       StopTyping();
     }
+    // prochain rendez-vous d'aujourd'hui (texte « 14:30 · Dentiste » renvoyé par Nox) dans les 15 min
+    bool NextEvent(DateTime now, out string title, out double minutes) {
+      title = ""; minutes = 0;
+      foreach (string it in agendaItems) {
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(it, @"^(\d{1,2}):(\d{2}) · (.+)$");
+        if (!m.Success) continue;
+        DateTime t = now.Date.AddHours(int.Parse(m.Groups[1].Value)).AddMinutes(int.Parse(m.Groups[2].Value));
+        double mins = (t - now).TotalMinutes;
+        if (mins > 15 || mins < -5) continue;
+        title = m.Groups[3].Value; minutes = Math.Max(0, mins);
+        string k15 = it + "|15", k0 = it + "|0";
+        if (mins > 0.5 && !evPeeked.Contains(k15)) {
+          evPeeked.Add(k15);
+          ShowPeek(null, "\uE787", "#FFFFFF", "#0A84FF", "Agenda", title, "dans " + (int)Math.Ceiling(mins) + " min · à " + t.ToString("HH:mm"), 6000, false);
+        } else if (mins <= 0.5 && !evPeeked.Contains(k0)) {
+          evPeeked.Add(k0);
+          ShowPeek(null, "\uE787", "#FFFFFF", "#0A84FF", "Agenda", title, "C'est maintenant", 6000, false);
+        }
+        return true;
+      }
+      return false;
+    }
+
+    void SetNoxButtons(string id, IEnumerable btns) {
+      List<object[]> list = new List<object[]>();
+      if (btns != null && !(btns is string))
+        foreach (object o in btns) {
+          Hashtable b = U(o) as Hashtable;
+          if (b != null && list.Count < 3) list.Add(new object[] { Str(G(b, "l")), Str(G(b, "a")) });
+        }
+      string key = id + "|" + list.Count;
+      foreach (object[] b in list) key += "|" + b[0];
+      if (key == btnKey) return;
+      btnKey = key;
+      Panel row = E<Panel>("NBtns");
+      row.Children.Clear();
+      foreach (object[] b in list) {
+        string action = (string)b[1];
+        Button bt = new Button();
+        bt.Style = (Style)win.FindResource("Chip");
+        bt.Margin = new Thickness(0, 0, 6, 0);
+        TextBlock tb = new TextBlock(); tb.Text = (string)b[0]; tb.FontSize = 12;
+        bt.Content = tb;
+        bt.Click += delegate { NoxCmd("bouton:" + id + "\u001f" + action); row.Children.Clear(); btnKey = ""; };
+        row.Children.Add(bt);
+      }
+      Vis("NBtns", list.Count > 0);
+    }
+
+    static readonly string[] DropTypes = { ".pdf", ".jpg", ".jpeg", ".png", ".webp", ".gif" };
+    void OnDrag(object o, DragEventArgs e) {
+      if (e.Data.GetDataPresent(DataFormats.FileDrop)) {
+        e.Effects = DragDropEffects.Copy;
+        lastDrag = DateTime.Now;
+        if (!dragging) {
+          dragging = true;
+          ShowPeek(null, "\uE898", "#FFFFFF", "#5E5CE6", "Nox", "Dépose le fichier ici", "Nox te proposera où le ranger", 60000, false);
+          Refresh();
+        }
+      } else e.Effects = DragDropEffects.None;
+      e.Handled = true;
+    }
+    void OnDrop(object o, DragEventArgs e) {
+      dragging = false;
+      e.Handled = true;
+      string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
+      if (files == null || files.Length == 0) return;
+      string f = files[0], ext = System.IO.Path.GetExtension(f).ToLowerInvariant(), name = System.IO.Path.GetFileName(f);
+      Hashtable n = G(sync, "nox") as Hashtable;
+      if (Array.IndexOf(DropTypes, ext) < 0)
+        ShowPeek(null, "\uE783", "#FFFFFF", "#FF453A", "Nox", "Format non pris en charge", "PDF ou photo seulement", 4000, false);
+      else if (new System.IO.FileInfo(f).Length > 5000000)
+        ShowPeek(null, "\uE783", "#FFFFFF", "#FF453A", "Nox", "Fichier trop lourd", "5 Mo maximum", 4000, false);
+      else if (n == null || !Bool(G(n, "ok")))
+        ShowPeek(null, "\uE783", "#FFFFFF", "#FF453A", "Nox", "Nox est injoignable", "Vérifie que Tailscale est lancé", 4000, false);
+      else {
+        NoxCmd("file:" + f);
+        ShowPeek(null, "\uE898", "#FFFFFF", "#30D158", "Nox", "Envoyé à Nox", name, 4000, false);
+        if (files.Length > 1) Log("glisser-déposer : seul le premier fichier est envoyé");
+      }
+      Refresh();
+    }
+
     void Confirm(bool yes) {
       Hashtable n = G(sync, "nox") as Hashtable;
       Hashtable conf = n == null ? null : G(n, "confirm") as Hashtable;
@@ -1338,7 +1450,20 @@ $noxScript = {
       # ordres venus de la pilule
       $c = $null
       while ($sync.noxcmds.TryDequeue([ref]$c)) {
-        if ($c -like 'send:*') { $pending += Post-Json '/api/conversation' @{ texte = $c.Substring(5) }; NLog 'message envoyé à Nox' }
+        if ($c -like 'file:*') {
+          $path = $c.Substring(5)
+          $ext = [System.IO.Path]::GetExtension($path).ToLower()
+          $mime = @{ '.pdf' = 'application/pdf'; '.jpg' = 'image/jpeg'; '.jpeg' = 'image/jpeg'; '.png' = 'image/png'; '.webp' = 'image/webp'; '.gif' = 'image/gif' }[$ext]
+          $b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($path))
+          $pending += Post-Json '/api/conversation' @{ texte = ''; image = @{ type = $mime; donnees = $b64 } }
+          NLog ("fichier envoyé à Nox : " + [System.IO.Path]::GetFileName($path))
+        }
+        elseif ($c -like 'bouton:*') {
+          $parts = $c.Substring(7).Split([char]0x1f, 2)
+          $pending += Post-Json '/api/conversation/bouton' @{ id = $parts[0]; action = $parts[1] }
+          NLog 'bouton de Nox'
+        }
+        elseif ($c -like 'send:*') { $pending += Post-Json '/api/conversation' @{ texte = $c.Substring(5) }; NLog 'message envoyé à Nox' }
         elseif ($c -like 'confirm:*') {
           $parts = $c.Split(':', 3)
           $pending += Post-Json '/api/conversation/confirmer' @{ jeton = $parts[2]; oui = ($parts[1] -eq '1') }
@@ -1381,7 +1506,11 @@ $noxScript = {
         $msgs = @($conv.messages)
         $state.occupe = [bool]$conv.occupe
         $lastNox = $msgs | Where-Object { $_.role -ne 'moi' } | Select-Object -Last 1
-        if ($lastNox) { $state.last = @{ id = [string]$lastNox.id; texte = [string]$lastNox.texte; heure = [string]$lastNox.heure } }
+        if ($lastNox) {
+          $btns = @()
+          foreach ($ligne in @($lastNox.boutons)) { foreach ($b in @($ligne)) { if ($b -and $b.s -eq 'appli' -and $btns.Count -lt 3) { $btns += @{ l = [string]$b.l; a = [string]$b.a } } } }
+          $state.last = @{ id = [string]$lastNox.id; texte = [string]$lastNox.texte; heure = [string]$lastNox.heure; boutons = $btns }
+        }
         $att = $msgs | Where-Object { $_.confirmation -and $_.confirmation.etat -eq 'attente' } | Select-Object -Last 1
         $state.confirm = if ($att) { @{ jeton = [string]$att.confirmation.jeton; description = [string]$att.confirmation.description } } else { $null }
       }
@@ -1529,6 +1658,7 @@ $workers = @(
         <Grid Grid.Column="1" VerticalAlignment="Center" Margin="9,0,9,0">
           <TextBlock x:Name="CClock" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" HorizontalAlignment="Center"/>
           <TextBlock x:Name="CTimer" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" Foreground="$TimerColor" HorizontalAlignment="Center"/>
+          <TextBlock x:Name="CEvent" FontFamily="Segoe UI Variable Text Semibold, Segoe UI Semibold" FontSize="12.5" Foreground="#64B5FF" HorizontalAlignment="Center" Visibility="Collapsed"/>
           <Canvas x:Name="CTitleBox" Height="18" Width="10" ClipToBounds="True" HorizontalAlignment="Left">
             <TextBlock x:Name="CTitle" FontSize="12.5" Foreground="#F2F2F7">
               <TextBlock.RenderTransform><TranslateTransform/></TextBlock.RenderTransform>
@@ -1696,6 +1826,7 @@ $workers = @(
                 <StackPanel>
                   <TextBlock x:Name="NLastTime" FontSize="10.5" Foreground="#8E8E93"/>
                   <TextBlock x:Name="NLast" FontSize="12.5" Foreground="#E5E5EA" TextWrapping="Wrap" MaxHeight="50" TextTrimming="CharacterEllipsis"/>
+                  <StackPanel x:Name="NBtns" Orientation="Horizontal" Margin="0,7,0,0" Visibility="Collapsed"/>
                 </StackPanel>
               </Border>
               <Border x:Name="NConfirm" Margin="0,8,0,0" Background="#26FF9F0A" CornerRadius="12" Padding="12,8" Visibility="Collapsed">
@@ -1710,8 +1841,9 @@ $workers = @(
               <Border Margin="0,10,0,0" CornerRadius="17" Background="#1FFFFFFF" Height="34" Padding="14,0,3,0">
                 <DockPanel>
                   <Button x:Name="BSend" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Padding="7"><TextBlock Text="&#xE724;" FontFamily="Segoe Fluent Icons" FontSize="13"/></Button>
+                  <Button x:Name="BMic" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Padding="7" ToolTip="Parler à Nox"><TextBlock Text="&#xE720;" FontFamily="Segoe Fluent Icons" FontSize="13"/></Button>
                   <Grid VerticalAlignment="Center">
-                    <TextBlock x:Name="NPh" Text="Demander à Nox…" FontSize="13" Foreground="#8E8E93" IsHitTestVisible="False"/>
+                    <TextBlock x:Name="NPh" Text="Demander à Nox… (ou glisse un fichier sur la pilule)" FontSize="13" Foreground="#8E8E93" IsHitTestVisible="False"/>
                     <TextBox x:Name="NInput" Background="Transparent" BorderThickness="0" Foreground="White" CaretBrush="White" FontSize="13" Padding="-2,0,0,0" FontFamily="Segoe UI Variable Text, Segoe UI"/>
                   </Grid>
                 </DockPanel>
