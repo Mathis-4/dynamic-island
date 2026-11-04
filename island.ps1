@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.12'
+$Version = '4.13'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -287,7 +287,7 @@ namespace Island {
     HashSet<string> evPeeked = new HashSet<string>();
     static readonly Color EventColor = Color.FromRgb(0x0A, 0x84, 0xFF);
     bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
-    bool noxUnread, peeking, tilted; string eyeModeShown = ""; string lastSong = "";
+    bool noxUnread, peeking, tilted; string clockShown = ""; string eyeModeShown = ""; string lastSong = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
     DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
@@ -710,7 +710,19 @@ namespace Island {
       DateTime now = DateTime.Now;
       bool hasMedia = HasMedia(), playing = Playing(), timerOn = timerEnd.HasValue;
       string clock = now.ToString("HH:mm");
-      E<TextBlock>("CClock").Text = clock; E<TextBlock>("EClock").Text = clock;
+      E<TextBlock>("EClock").Text = clock;
+      if (clock != clockShown) {   // pilule au repos : date discrète + heure (« Mer 4 nov  20:35 »)
+        clockShown = clock;
+        string d = now.ToString("ddd d MMM", fr).Replace(".", "");
+        d = char.ToUpper(d[0]) + d.Substring(1);
+        TextBlock cc = E<TextBlock>("CClock");
+        cc.Inlines.Clear();
+        System.Windows.Documents.Run rd = new System.Windows.Documents.Run(d + "   ");
+        rd.Foreground = Br("#A1A1A6"); rd.FontSize = 12.5;
+        rd.FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI");
+        cc.Inlines.Add(rd);
+        cc.Inlines.Add(new System.Windows.Documents.Run(clock));
+      }
       E<TextBlock>("EDate").Text = fr.TextInfo.ToTitleCase(now.ToString("dddd d MMMM", fr));
 
       double w, h, r, resp, damp, bub = 0; string name;
