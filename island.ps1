@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.4'
+$Version = '4.5'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -345,7 +345,7 @@ namespace Island {
       win.PreviewMouseLeftButtonUp += delegate { Squish(1, 320); };
 
       // boutons
-      Click("BPlay", delegate { Cmd("play"); });
+      Click("BPlay", delegate { Cmd(HasMedia() ? "play" : "spotify"); });
       Click("BNext", delegate { Cmd("next"); });
       Click("BPrev", delegate { Cmd("prev"); });
       Click("BT25", delegate { StartTimer(25, "Focus"); });
@@ -592,7 +592,7 @@ namespace Island {
       List<string> l = new List<string>();
       // musique en cours : Musique puis Nox ; sinon Nox en premier
       if (Playing()) { l.Add("PgMusic"); l.Add("PgNox"); }
-      else { l.Add("PgNox"); if (HasMedia()) l.Add("PgMusic"); }
+      else { l.Add("PgNox"); l.Add("PgMusic"); }   // l'onglet Musique reste là pour lancer Spotify
       l.Add("PgTimer"); l.Add("PgToday");
       return l;
     }
@@ -939,7 +939,15 @@ namespace Island {
         if (!firstTrack && Bool(G(sync, "playing")) && !expandedOn) ShowPeek(art, "", "#FFFFFF", "#1C1C1E", app, title, artist, 3000, false);
         firstTrack = false;
       }
-      if (md == null) trackKey = "";
+      if (md == null && trackKey != "none") {   // rien en lecture : de quoi lancer Spotify
+        trackKey = "none";
+        SetArt("EArtBox", null); Vis("EArtIco", true);
+        E<TextBlock>("ETitle").Text = "Rien en lecture";
+        E<TextBlock>("EArtist").Text = "Appuie sur lecture pour lancer Spotify";
+        E<TextBlock>("EApp").Text = "Spotify";
+        accent = accentDefault; AnimColor(accentBrush, SolidColorBrush.ColorProperty, accent, 600);
+      }
+      Vis("BPrev", md != null); Vis("BNext", md != null);
       E<TextBlock>("BPlayIco").Text = Bool(G(sync, "playing")) ? "" : "";
       Hashtable tl = G(sync, "timeline") as Hashtable;
       if (md != null && tl != null && Num(G(tl, "end")) > 1) {
@@ -1138,6 +1146,7 @@ $mediaScript = {
   $http.DefaultRequestHeaders.UserAgent.ParseAdd('MathisDynamicIsland/1.0')
   $updNext = [DateTime]::Now.AddSeconds(15)
   $trackKey = ''
+  $spotifyUntil = [DateTime]::MinValue
   $fallback = [System.Windows.Media.ColorConverter]::ConvertFromString($sync.accent)
 
   while (-not $sync.stop) {
@@ -1151,6 +1160,13 @@ $mediaScript = {
 
         $c = $null
         while ($sync.cmds.TryDequeue([ref]$c)) {
+          if ($c -eq 'spotify') {
+            # ouvre Spotify puis lance la lecture dès que sa session apparaît
+            try { Start-Process 'spotify:' } catch { BLog ("Spotify : " + $_.Exception.Message) }
+            $spotifyUntil = [DateTime]::Now.AddSeconds(15)
+            BLog 'ouverture de Spotify'
+            continue
+          }
           if (-not $sess) { continue }
           if ($c -eq 'play') { $null = $sess.TryTogglePlayPauseAsync() }
           elseif ($c -eq 'next') { $null = $sess.TrySkipNextAsync() }
@@ -1175,6 +1191,23 @@ $mediaScript = {
               $ok = Await ($sess.TryChangePlaybackPositionAsync($ticks)) ([bool])
               BLog "position $([int]($ms/1000)) s via Windows : $ok"
             }
+          }
+        }
+
+        if ($spotifyUntil -gt [DateTime]::Now) {
+          $sp = @($mgr.GetSessions()) | Where-Object { $_.SourceAppUserModelId -like '*Spotify*' } | Select-Object -First 1
+          if ($sp) {
+            if ($sp.GetPlaybackInfo().PlaybackStatus.ToString() -ne 'Playing') { $null = $sp.TryPlayAsync() }
+            $spotifyUntil = [DateTime]::MinValue; BLog 'lecture Spotify lancée'
+          }
+        } elseif ($spotifyUntil -ne [DateTime]::MinValue) {
+          $spotifyUntil = [DateTime]::MinValue
+          if ($sync.noxUrl) {   # Spotify ouvert mais sans session Windows : on demande à Nox de reprendre la lecture
+            try {
+              $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post), ($sync.noxUrl + '/api/musique')
+              $req.Content = New-Object System.Net.Http.StringContent '{"action":"lecture","leger":true}', ([System.Text.Encoding]::UTF8), 'application/json'
+              $req.Headers.Add('X-Jarvis', '1'); $null = $http.SendAsync($req); BLog 'lecture demandée à Nox'
+            } catch {}
           }
         }
 
