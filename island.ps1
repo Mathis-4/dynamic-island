@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.17'
+$Version = '4.18'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -297,8 +297,8 @@ namespace Island {
     double vol = -2; bool muted = false; int battPct = 100; bool? power = null; bool lowWarned = false;
     string noxMsgId = null; bool noxSeen = false; string noxState = "";
     double wheelAcc = 0; int tickN = 0;
-    string[] pageNames = { "PgMusic", "PgTimer", "PgNox", "PgToday" };
-    string[] tabNames = { "TabMusic", "TabTimer", "TabNox", "TabToday" };
+    string[] pageNames = { "PgMusic", "PgTimer", "PgNox", "PgToday", "PgAgenda" };
+    string[] tabNames = { "TabMusic", "TabTimer", "TabNox", "TabToday", "TabAgenda" };
     System.Globalization.CultureInfo fr = System.Globalization.CultureInfo.GetCultureInfo("fr-FR");
 
     public App(Window w, Hashtable s, Hashtable c) {
@@ -586,7 +586,6 @@ namespace Island {
         bool playing = Playing();
         if (DateTime.Now < peekUntil && (peekIsConfirm || E<TextBlock>("PApp").Text == "Nox")) { peekUntil = DateTime.MinValue; ShowPage("PgNox", 0); }
         else if (playing) ShowPage("PgMusic", 0);
-        else if (timerEnd.HasValue) ShowPage("PgTimer", 0);
         else ShowPage(PageList()[0], 0);   // rien ne joue : Nox d'abord
       }
       bool fly = on && page == "PgMusic" && Playing() && layer == "Compact";
@@ -659,7 +658,7 @@ namespace Island {
       // musique en cours : Musique puis Nox ; sinon Nox en premier
       if (Playing()) { l.Add("PgMusic"); l.Add("PgNox"); }
       else { l.Add("PgNox"); l.Add("PgMusic"); }   // l'onglet Musique reste là pour lancer Spotify
-      l.Add("PgTimer"); l.Add("PgToday");
+      l.Add("PgAgenda");   // Minuteur et Aujourd'hui retirés (demande de Mathis), remplacés par l'agenda
       return l;
     }
     void GoPage(string p) {
@@ -817,7 +816,7 @@ namespace Island {
         if (!l.Contains(page)) ShowPage(l[0], 0);
         else if (string.Join(",", l.ToArray()) != tabOrder) ShowPage(page, 0);
         // la vue ne rétrécit pas tant que la souris est dessus (sinon elle se refermerait sous le curseur)
-        string ek = page + "|" + VisKey("NConfirm") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
+        string ek = page + "|" + agendaRev + "|" + VisKey("NConfirm") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
         if (ek != expKey) { expKey = ek; expanded.Height = double.NaN; expNatural = Math.Ceiling(Natural(expanded, 440).Height); }
         stickyH = expNatural;   // chaque widget a sa hauteur (plus de vide) ; un délai de grâce évite la fermeture sous le curseur
         expanded.Height = stickyH;
@@ -1239,6 +1238,7 @@ namespace Island {
       }
       E<UIElement>("CEyes").Opacity = state == "off" ? 0.55 : 1;
       if (n == null || !Bool(G(n, "ok"))) { Vis("NConfirm", false); return; }
+      Safe("agenda", delegate { UpdateAgenda(G(n, "week") as IEnumerable); });
       Hashtable wd = G(n, "widget") as Hashtable;
       if (wd != null) {
         Hashtable me = G(wd, "meteo") as Hashtable;
@@ -1379,6 +1379,100 @@ namespace Island {
         if (files.Length > 1) Log("glisser-déposer : seul le premier fichier est envoyé");
       }
       Refresh();
+    }
+
+    // ---------------- Agenda ----------------
+    List<Hashtable> week = new List<Hashtable>();
+    string weekKey = "", selDate = "";
+    int agendaRev = 0;
+    void UpdateAgenda(IEnumerable data) {
+      if (data == null || data is string) return;
+      List<Hashtable> days = new List<Hashtable>();
+      string key = "";
+      foreach (object o in data) {
+        Hashtable d = U(o) as Hashtable; if (d == null) continue;
+        days.Add(d);
+        key += Str(G(d, "date")) + ":";
+        IEnumerable ev = G(d, "evts") as IEnumerable;
+        if (ev != null && !(ev is string)) foreach (object e in ev) { Hashtable h = U(e) as Hashtable; if (h != null) key += Str(G(h, "debut")) + Str(G(h, "titre")) + ";"; }
+      }
+      string today = DateTime.Now.ToString("yyyy-MM-dd");
+      if (key == weekKey && (selDate.Length == 0 || string.Compare(selDate, today) >= 0)) return;
+      weekKey = key; week = days;
+      if (selDate.Length == 0 || string.Compare(selDate, today) < 0) selDate = today;
+      RenderAgenda();
+    }
+    static DateTime ParseDay(string s) { DateTime d; return DateTime.TryParseExact(s, "yyyy-MM-dd", null, System.Globalization.DateTimeStyles.None, out d) ? d : DateTime.Today; }
+    List<Hashtable> EventsOf(Hashtable day) {
+      List<Hashtable> l = new List<Hashtable>();
+      IEnumerable ev = G(day, "evts") as IEnumerable;
+      if (ev != null && !(ev is string)) foreach (object e in ev) { Hashtable h = U(e) as Hashtable; if (h != null) l.Add(h); }
+      return l;
+    }
+    void RenderAgenda() {
+      agendaRev++;
+      Panel daysRow = E<Panel>("ADays"), list = E<Panel>("AList");
+      daysRow.Children.Clear(); list.Children.Clear();
+      string today = DateTime.Now.ToString("yyyy-MM-dd");
+      Hashtable sel = null;
+      foreach (Hashtable d in week) {
+        string ds = Str(G(d, "date"));
+        DateTime dt = ParseDay(ds);
+        bool isSel = ds == selDate, isToday = ds == today;
+        if (isSel) sel = d;
+        string lettre = dt.ToString("ddd", fr).Replace(".", "");
+        lettre = char.ToUpper(lettre[0]) + lettre.Substring(1);
+        StackPanel sp = new StackPanel(); sp.HorizontalAlignment = HorizontalAlignment.Center;
+        TextBlock t1 = new TextBlock(); t1.Text = lettre; t1.FontSize = 11; t1.Foreground = Br("#8E8E93"); t1.HorizontalAlignment = HorizontalAlignment.Center;
+        Border num = new Border(); num.Width = 26; num.Height = 26; num.CornerRadius = new CornerRadius(13); num.Margin = new Thickness(0, 3, 0, 2);
+        num.Background = isToday ? Br("#FF453A") : (isSel ? Br("#33FFFFFF") : Brushes.Transparent);
+        TextBlock t2 = new TextBlock(); t2.Text = dt.Day.ToString(); t2.FontSize = 14; t2.FontWeight = FontWeights.SemiBold;
+        t2.HorizontalAlignment = HorizontalAlignment.Center; t2.VerticalAlignment = VerticalAlignment.Center;
+        num.Child = t2;
+        Ellipse dot = new Ellipse(); dot.Width = 4; dot.Height = 4; dot.HorizontalAlignment = HorizontalAlignment.Center;
+        dot.Fill = EventsOf(d).Count > 0 ? (Brush)Br("#A1A1A6") : Brushes.Transparent;
+        sp.Children.Add(t1); sp.Children.Add(num); sp.Children.Add(dot);
+        if (isSel && !isToday) num.BorderBrush = Br("#66FFFFFF");
+        Border cell = new Border(); cell.Background = Brushes.Transparent; cell.Cursor = Cursors.Hand; cell.Child = sp;
+        cell.CornerRadius = new CornerRadius(10); cell.Padding = new Thickness(0, 2, 0, 2);
+        if (isSel) cell.Background = Br("#14FFFFFF");
+        string target = ds;
+        cell.MouseLeftButtonUp += delegate { selDate = target; RenderAgenda(); Refresh(); };
+        daysRow.Children.Add(cell);
+      }
+      DateTime selDt = ParseDay(selDate);
+      string m = selDt.ToString("dddd d MMMM", fr);
+      E<TextBlock>("AMonth").Text = selDate == today ? "Aujourd'hui · " + m : char.ToUpper(m[0]) + m.Substring(1);
+      List<Hashtable> evs = sel == null ? new List<Hashtable>() : EventsOf(sel);
+      if (evs.Count == 0) {
+        TextBlock empty = new TextBlock(); empty.Text = "Rien de prévu. Je garde un œil ouvert."; empty.FontSize = 12.5; empty.Foreground = Br("#8E8E93"); empty.Margin = new Thickness(2, 2, 0, 2);
+        list.Children.Add(empty);
+      }
+      int shown = 0;
+      foreach (Hashtable ev in evs) {
+        if (shown == 3) {
+          TextBlock more = new TextBlock(); more.Text = "+ " + (evs.Count - 3) + " autre" + (evs.Count - 3 > 1 ? "s" : ""); more.FontSize = 12; more.Foreground = Br("#8E8E93"); more.Margin = new Thickness(13, 2, 0, 0);
+          list.Children.Add(more); break;
+        }
+        shown++;
+        string titre = Str(G(ev, "titre")), debut = Str(G(ev, "debut")), fin = Str(G(ev, "fin")), lieu = Str(G(ev, "lieu")), lien = Str(G(ev, "lien"));
+        bool journee = Bool(G(ev, "journee"));
+        DockPanel row = new DockPanel(); row.Margin = new Thickness(0, 0, 0, 6); row.Background = Brushes.Transparent;
+        Border bar = new Border(); bar.Width = 3; bar.CornerRadius = new CornerRadius(1.5); bar.Background = Br(EventColor); bar.Margin = new Thickness(0, 1, 10, 1);
+        DockPanel.SetDock(bar, Dock.Left);
+        StackPanel txt = new StackPanel();
+        TextBlock a = new TextBlock(); a.Text = titre; a.FontSize = 13; a.FontWeight = FontWeights.SemiBold; a.TextTrimming = TextTrimming.CharacterEllipsis;
+        TextBlock b = new TextBlock(); b.FontSize = 11.5; b.Foreground = Br("#AEAEB2"); b.TextTrimming = TextTrimming.CharacterEllipsis;
+        b.Text = (journee ? "Toute la journée" : debut + (fin.Length > 0 ? " – " + fin : "")) + (lieu.Length > 0 ? "  ·  " + lieu : "");
+        txt.Children.Add(a); txt.Children.Add(b);
+        row.Children.Add(bar); row.Children.Add(txt);
+        if (lien.Length > 0) {
+          row.Cursor = Cursors.Hand;
+          string url = lien;
+          row.MouseLeftButtonUp += delegate { try { System.Diagnostics.Process.Start(url); } catch (Exception ex) { Log("agenda : " + ex.Message); } };
+        }
+        list.Children.Add(row);
+      }
     }
 
     void Confirm(bool yes) {
@@ -1629,7 +1723,7 @@ $noxScript = {
 
   $state = @{ ok = $false; state = 'nourl'; error = 'recherche de Nox…' }
   $sync.nox = $state.Clone()
-  $nextFind = [DateTime]::MinValue; $nextEquipe = [DateTime]::MinValue; $nextWidget = [DateTime]::MinValue
+  $nextFind = [DateTime]::MinValue; $nextEquipe = [DateTime]::MinValue; $nextWidget = [DateTime]::MinValue; $nextWeek = [DateTime]::MinValue
   $pouls = $null; $f = ''; $needConv = $true; $lastErr = ''; $pending = @()
 
   while (-not $sync.stop) {
@@ -1687,6 +1781,21 @@ $noxScript = {
           if ($w.meteo) { $me = @{ temp = [string]$w.meteo.temp; libelle = [string]$w.meteo.libelle; min = [string]$w.meteo.min; max = [string]$w.meteo.max } }
           $state.widget = @{ meteo = $me; agenda = @($w.agenda_liste | Where-Object { $_ } | ForEach-Object { [string]$_ }) }
         } catch { NLog ("widget : " + $_.Exception.Message) }
+      }
+      # agenda des 7 prochains jours (onglet Agenda), toutes les 10 min
+      if ([DateTime]::Now -ge $nextWeek) {
+        $nextWeek = [DateTime]::Now.AddMinutes(10)
+        try {
+          $d0 = (Get-Date).Date
+          $w1 = Get-Json ('/api/carnet/semaine?date=' + $d0.ToString('yyyy-MM-dd')) 20000
+          $w2 = Get-Json ('/api/carnet/semaine?date=' + $d0.AddDays(7).ToString('yyyy-MM-dd')) 20000
+          $tous = @(@($w1.jours) + @($w2.jours)) | Where-Object { $_ -and [string]$_.date -ge $d0.ToString('yyyy-MM-dd') } | Select-Object -First 7
+          $state.week = @($tous | ForEach-Object {
+            $evs = @($_.evenements | Where-Object { $_ } | ForEach-Object {
+              @{ titre = [string]$_.titre; debut = [string]$_.debut; fin = [string]$_.fin; journee = [bool]$_.journee; lieu = [string]$_.lieu; lien = [string]$_.lien } })
+            @{ date = [string]$_.date; evts = $evs }
+          })
+        } catch { NLog ("agenda : " + $_.Exception.Message); $nextWeek = [DateTime]::Now.AddMinutes(1) }
       }
       # fil de discussion : le « pouls » revient dès qu'un message arrive
       if ($pouls -and $pouls.IsCompleted) {
@@ -1960,6 +2069,12 @@ $workers = @(
                 <TextBlock Text="Nox" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
               </StackPanel>
             </Button>
+            <Button x:Name="TabAgenda" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE787;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Agenda" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
             <Button x:Name="TabToday" Style="{StaticResource Tab}">
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="&#xE787;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -2092,6 +2207,13 @@ $workers = @(
                   </Grid>
                 </DockPanel>
               </Border>
+            </StackPanel>
+
+            <!-- Agenda : les 7 prochains jours, puis les rendez-vous du jour choisi -->
+            <StackPanel x:Name="PgAgenda" Visibility="Collapsed">
+              <TextBlock x:Name="AMonth" FontSize="12" Foreground="#8E8E93" Margin="2,0,0,6"/>
+              <UniformGrid x:Name="ADays" Columns="7" Margin="0,0,0,10"/>
+              <StackPanel x:Name="AList"/>
             </StackPanel>
 
             <!-- Aujourd'hui -->
