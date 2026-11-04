@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.21'
+$Version = '4.22'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -195,6 +195,20 @@ namespace Island {
         c.ArcTo(new Point(x + w - r, h), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
         c.LineTo(new Point(x + r, h), false, false);
         c.ArcTo(new Point(x, h - r), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
+      }
+      g.Freeze(); return g;
+    }
+    // contour des côtés et du bas seulement (le haut touche le bord de l'écran) : tous les segments sont tracés
+    public static Geometry NotchEdge(double x, double w, double h, double r) {
+      r = Math.Max(0, Math.Min(r, Math.Min(w / 2, h)));
+      StreamGeometry g = new StreamGeometry();
+      using (StreamGeometryContext c = g.Open()) {
+        c.BeginFigure(new Point(x, 0), false, false);
+        c.LineTo(new Point(x, h - r), true, true);
+        c.ArcTo(new Point(x + r, h), new Size(r, r), 0, false, SweepDirection.Counterclockwise, true, true);
+        c.LineTo(new Point(x + w - r, h), true, true);
+        c.ArcTo(new Point(x + w, h - r), new Size(r, r), 0, false, SweepDirection.Counterclockwise, true, true);
+        c.LineTo(new Point(x + w, 0), true, true);
       }
       g.Freeze(); return g;
     }
@@ -518,7 +532,7 @@ namespace Island {
       double x = Cx - w / 2;
       Geometry g = Fx.Notch(x, w, h, r);
       shape.Data = g;
-      edgePath.Data = Fx.Notch(x + 0.8, w - 1.6, h - 0.8, Math.Max(0, r - 0.8));   // légèrement à l'intérieur : pas coupé par le bord
+      edgePath.Data = Fx.NotchEdge(x + 0.8, w - 1.6, h - 0.8, Math.Max(0, r - 0.8));   // légèrement à l'intérieur : pas coupé par le bord
       clipHost.Clip = g;
       ((TranslateTransform)earL.RenderTransform).X = x - 12;
       ((TranslateTransform)earR.RenderTransform).X = x + w;
@@ -2262,7 +2276,7 @@ $workers = @(
       <Border x:Name="Flyer" Visibility="Collapsed" CornerRadius="9" IsHitTestVisible="False"/>
     </Canvas>
     <!-- liseré coloré, dessiné par-dessus tout le reste -->
-    <Path x:Name="Edge" IsHitTestVisible="False" StrokeThickness="1.6" StrokeLineJoin="Round"/>
+    <Path x:Name="Edge" IsHitTestVisible="False" StrokeThickness="1.6" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
   </Canvas>
 </Window>
 
