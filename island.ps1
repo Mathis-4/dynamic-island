@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.10'
+$Version = '4.11'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -285,7 +285,7 @@ namespace Island {
     HashSet<string> evPeeked = new HashSet<string>();
     static readonly Color EventColor = Color.FromRgb(0x0A, 0x84, 0xFF);
     bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
-    bool noxUnread, peeking, tilted; string lastSong = "";
+    bool noxUnread, peeking, tilted; string eyeModeShown = ""; string lastSong = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
     DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
@@ -739,7 +739,16 @@ namespace Island {
         Vis("CArtBox", music); Vis("CTitleBox", music); Vis("CEq", music);
         // plus d'anneau de batterie (demande de Mathis) : l'anneau sert au minuteur et au prochain rendez-vous
         Vis("CRingBox", (timerOn || ev) && !music); Vis("CTimer", timerOn && !music); Vis("CEvent", ev && !music);
-        Vis("CClock", !music && !timerOn && !ev); Vis("CEyes", true);   // le masque de Nox reste aussi pendant la musique
+        Vis("CClock", !music && !timerOn && !ev); Vis("CEyes", true);   // les yeux de Nox restent aussi pendant la musique
+        // ils prennent la couleur de la pochette pendant la musique (rouges si Nox est injoignable)
+        string eyeMode = noxState == "down" ? "down" : (music ? "music" : "idle");
+        if (eyeMode != eyeModeShown) {
+          eyeModeShown = eyeMode;
+          Brush f = eyeMode == "down" ? (Brush)Br("#FF6B5E") : (eyeMode == "music" ? (Brush)accentBrush : Br("#F4EFE6"));
+          E<Ellipse>("CEyeFillL").Fill = f; E<Ellipse>("CEyeFillR").Fill = f;
+        }
+        Color gc = eyeMode == "music" ? accent : (eyeMode == "down" ? Rgb("#FF6B5E") : Rgb("#F4EFE6"));
+        if (eyeGlow.Color != gc) eyeGlow.Color = gc;
         Path ring = E<Path>("CRing");
         if (timerOn && !music) {
           ring.Stroke = Br(timerColor);
@@ -1069,8 +1078,6 @@ namespace Island {
       Vis("NAct", act.Length > 0);
       // masque bordé de rouge en cas d'erreur, estompé quand Nox est introuvable (charte de Nox)
       // petits yeux de la pilule : crème avec une lueur douce, rouges si Nox est injoignable
-      Brush eyeFill = Br(state == "down" ? "#FF6B5E" : "#F4EFE6");
-      E<Ellipse>("CEyeFillL").Fill = eyeFill; E<Ellipse>("CEyeFillR").Fill = eyeFill;
       foreach (string mk in new[] { "PkMask", "NMask" }) {
         Border mb = E<Border>(mk);
         mb.BorderThickness = new Thickness(state == "down" ? (mk == "NMask" ? 2.5 : 1.2) : 0);
