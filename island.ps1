@@ -1,59 +1,71 @@
 ﻿# ============================================================
 #  Dynamic Island de Mathis - Windows 11
+#  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '3.0'
+$Version = '4.0'
 
 # ---------- Réglages ----------
-$NoxStatusUrl     = ""         # ex. "https://ton-vps/nox/status" (JSON) ; vide = non connecté
-$NoxToken         = ""         # facultatif : envoyé en "Authorization: Bearer ..."
-$DefaultAccent    = "#8B7CFF"  # couleur quand la pochette n'en donne pas (violet Nox)
+$NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
+$DefaultAccent    = "#8B7CFF"  # violet Nox
 $TimerColor       = "#FF9F0A"
 $ChargeColor      = "#30D158"
 $HideInFullscreen = $true
 # ------------------------------
 
-$Here    = Split-Path -Parent $MyInvocation.MyCommand.Path
-# Réglages perso (jamais écrasés par les mises à jour) : config.ps1 à côté de ce fichier
+$Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigPath = Join-Path $Here 'config.ps1'
 if (Test-Path $ConfigPath) { . $ConfigPath }
+if ($NoxStatusUrl -and -not $NoxUrl) { $NoxUrl = '' }   # ancien réglage, plus utilisé
 $UpdateRepo = 'Mathis-4/dynamic-island'
 $LogPath = Join-Path $Here 'island.log'
+$SkipPath = Join-Path $Here 'skip.txt'
 try { Set-Content -Path $LogPath -Value "Dynamic Island v$Version - $(Get-Date)" -Encoding UTF8 } catch {}
-$script:lastLog = ''
-function Log($m) {
-  if ($m -eq $script:lastLog) { return }
-  $script:lastLog = $m
-  try { Add-Content -Path $LogPath -Value ("{0:HH:mm:ss} UI  {1}" -f (Get-Date), $m) -Encoding UTF8 } catch {}
-}
+function Log($m) { try { Add-Content -Path $LogPath -Value ("{0:HH:mm:ss} PS  {1}" -f (Get-Date), $m) -Encoding UTF8 } catch {} }
 
-function Step($m) { if ($sync) { $sync.step = $m }; if (-not $Isl -or $Isl.tick -le 2) { Log ("étape : " + $m) } }
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
 # Une seule instance
 $created = $false
 $script:mutex = New-Object System.Threading.Mutex($true, "Global\MathisDynamicIsland", [ref]$created)
 if (-not $created) { exit }
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Windows.Forms, System.Net.Http
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
+function Restart-Island {
+  try { $script:mutex.ReleaseMutex() } catch {}
+  Start-Process (Join-Path $env:WINDIR 'System32\conhost.exe') ('--headless powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "' + (Join-Path $Here 'island.ps1') + '"')
+}
+# En cas d'échec au démarrage : retour automatique à la version précédente
+function Fail($what, $err) {
+  Log "ÉCHEC ($what) : $err"
+  $bak = Join-Path $Here 'island.ps1.bak'
+  if ((Test-Path $bak) -and -not $env:ISLAND_ROLLBACK) {
+    Add-Content -Path $SkipPath -Value $Version
+    Copy-Item $bak (Join-Path $Here 'island.ps1') -Force
+    Log "retour à la version précédente (v$Version ne sera plus proposée)"
+    $env:ISLAND_ROLLBACK = '1'
+    Restart-Island
+  }
+  exit
+}
 
-# ============================================================
-#  Code natif (C#) : volume, fenêtre, ressorts, couleurs
-# ============================================================
-$refs = @(
-  'System.dll',
-  [System.Windows.Window].Assembly.Location,
-  [System.Windows.Media.Color].Assembly.Location,
-  [System.Windows.DependencyObject].Assembly.Location,
-  [System.Xaml.XamlReader].Assembly.Location
-)
-Add-Type -ReferencedAssemblies $refs -TypeDefinition @'
+$CSharp = @'
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
+using System.Windows.Shapes;
+using System.Windows.Threading;
+using Path = System.Windows.Shapes.Path;
+using System.Management.Automation;
 
 namespace Island {
   [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -120,12 +132,17 @@ namespace Island {
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
     [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
-    public static void NoActivate(IntPtr h) {
+    [StructLayout(LayoutKind.Sequential)] struct SPS { public byte AC; public byte Flag; public byte Pct; public byte Saver; public int Life; public int Full; }
+    [DllImport("kernel32.dll")] static extern bool GetSystemPowerStatus(out SPS s);
+    const int WS_EX_NOACTIVATE = 0x08000000, WS_EX_TOOLWINDOW = 0x00000080;
+    public static void NoActivate(IntPtr h, bool on) {
       int ex = GetWindowLong(h, -20);
-      SetWindowLong(h, -20, ex | 0x08000000 | 0x00000080);
+      ex = on ? (ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) : ((ex & ~WS_EX_NOACTIVATE) | WS_EX_TOOLWINDOW);
+      SetWindowLong(h, -20, ex);
     }
     public static bool ForegroundIsFullscreen(int sw, int sh, IntPtr self) {
       IntPtr h = GetForegroundWindow();
@@ -136,11 +153,19 @@ namespace Island {
       RECT r; if (!GetWindowRect(h, out r)) return false;
       return Math.Abs(r.L) <= 1 && Math.Abs(r.T) <= 1 && Math.Abs(r.R - sw) <= 1 && Math.Abs(r.B - sh) <= 1;
     }
+    // pourcentage (-1 si pas de batterie) et secteur
+    public static int Battery(out bool charging) {
+      SPS s; charging = false;
+      if (!GetSystemPowerStatus(out s)) return -1;
+      charging = s.AC == 1;
+      if (s.Flag == 128 || s.Pct == 255) return -1;
+      return s.Pct;
+    }
   }
 
   // Ressort amorti façon SwiftUI : response (s) + dampingFraction
   public class Spring {
-    public double Value, Velocity, Target, Response = 0.45, Damping = 0.75;
+    public double Value, Velocity, Target, Response = 0.4, Damping = 0.8;
     public Spring(double v) { Value = v; Target = v; }
     public void Step(double dt) {
       double k = Math.Pow(2 * Math.PI / Response, 2);
@@ -148,72 +173,33 @@ namespace Island {
       double a = -k * (Value - Target) - c * Velocity;
       Velocity += a * dt; Value += Velocity * dt;
     }
-    public bool Settled { get { return Math.Abs(Value - Target) < 0.15 && Math.Abs(Velocity) < 1.0; } }
+    public bool Settled { get { return Math.Abs(Value - Target) < 0.1 && Math.Abs(Velocity) < 0.8; } }
     public void Snap() { Value = Target; Velocity = 0; }
   }
 
-  // Fait "morpher" la pilule (largeur, hauteur, arrondi) + la bulle à côté
-  public class Morph {
-    Border pill; FrameworkElement content; Border bubble;
-    public Spring W, H, R, B;
-    bool running; TimeSpan last;
-    public Morph(Border pill, FrameworkElement content, Border bubble, double w, double h) {
-      this.pill = pill; this.content = content; this.bubble = bubble;
-      W = new Spring(w); H = new Spring(h); R = new Spring(h / 2); B = new Spring(0);
-      Apply();
-    }
-    public void To(double w, double h, double r, double response, double damping) {
-      W.Target = w; H.Target = h; R.Target = r;
-      W.Response = response; H.Response = response; R.Response = response;
-      W.Damping = damping; H.Damping = damping; R.Damping = Math.Min(1.0, damping + 0.1);
-      Start();
-    }
-    public void BubbleTo(double size) { B.Target = size; B.Response = 0.5; B.Damping = 0.68; Start(); }
-    void Start() { if (!running) { running = true; last = TimeSpan.Zero; CompositionTarget.Rendering += OnFrame; } }
-    void OnFrame(object s, EventArgs e) {
-      RenderingEventArgs re = e as RenderingEventArgs;
-      double dt = 1.0 / 60;
-      if (re != null) {
-        if (last != TimeSpan.Zero) dt = (re.RenderingTime - last).TotalSeconds;
-        last = re.RenderingTime;
-      }
-      if (dt <= 0) return;
-      if (dt > 0.05) dt = 0.05;
-      int n = (int)Math.Ceiling(dt / 0.004); double st = dt / n;
-      for (int i = 0; i < n; i++) { W.Step(st); H.Step(st); R.Step(st); B.Step(st); }
-      if (W.Settled && H.Settled && R.Settled && B.Settled) {
-        W.Snap(); H.Snap(); R.Snap(); B.Snap();
-        CompositionTarget.Rendering -= OnFrame; running = false;
-      }
-      Apply();
-    }
-    void Apply() {
-      double w = Math.Max(20, W.Value), h = Math.Max(20, H.Value);
-      double r = Math.Max(0, Math.Min(R.Value, Math.Min(w, h) / 2));
-      pill.Width = w; pill.Height = h; pill.CornerRadius = new CornerRadius(0, 0, r, r);
-      content.Clip = Fx.Notch(w, h, r);
-      if (bubble != null) {
-        double b = Math.Max(0, B.Value);
-        bubble.Width = b; bubble.Height = b;
-        bubble.CornerRadius = new CornerRadius(b / 2);
-        bubble.Margin = new Thickness(Math.Min(8, b * 8 / 36), 0, 0, 0);
-        bubble.Opacity = Math.Max(0, Math.Min(1, b / 30));
-        bubble.Visibility = b < 0.5 ? Visibility.Collapsed : Visibility.Visible;
-      }
-    }
-  }
-
   public static class Fx {
-    // Rectangle collé en haut, arrondi seulement en bas (forme d'encoche)
-    public static Geometry Notch(double w, double h, double r) {
+    public static Geometry Notch(double x, double w, double h, double r) {
+      r = Math.Max(0, Math.Min(r, Math.Min(w / 2, h)));
       StreamGeometry g = new StreamGeometry();
       using (StreamGeometryContext c = g.Open()) {
-        c.BeginFigure(new Point(0, 0), true, true);
-        c.LineTo(new Point(w, 0), false, false);
-        c.LineTo(new Point(w, h - r), false, false);
-        c.ArcTo(new Point(w - r, h), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
-        c.LineTo(new Point(r, h), false, false);
-        c.ArcTo(new Point(0, h - r), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
+        c.BeginFigure(new Point(x, 0), true, true);
+        c.LineTo(new Point(x + w, 0), false, false);
+        c.LineTo(new Point(x + w, h - r), false, false);
+        c.ArcTo(new Point(x + w - r, h), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
+        c.LineTo(new Point(x + r, h), false, false);
+        c.ArcTo(new Point(x, h - r), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
+      }
+      g.Freeze(); return g;
+    }
+    public static Geometry Arc(double size, double thickness, double frac) {
+      frac = Math.Max(0.0001, Math.Min(0.9999, frac));
+      double r = (size - thickness) / 2, c = size / 2, a = frac * 2 * Math.PI;
+      Point p0 = new Point(c, c - r);
+      Point p1 = new Point(c + r * Math.Sin(a), c - r * Math.Cos(a));
+      StreamGeometry g = new StreamGeometry();
+      using (StreamGeometryContext ctx = g.Open()) {
+        ctx.BeginFigure(p0, false, false);
+        ctx.ArcTo(p1, new Size(r, r), 0, frac > 0.5, SweepDirection.Clockwise, true, true);
       }
       g.Freeze(); return g;
     }
@@ -230,7 +216,6 @@ namespace Island {
       else if (h < 240) { g = x; b = c; } else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
       return Color.FromRgb((byte)Math.Round((r + m) * 255), (byte)Math.Round((g + m) * 255), (byte)Math.Round((b + m) * 255));
     }
-    // Couleur dominante "vive" d'une pochette (histogramme des teintes pondéré par saturation)
     public static Color Dominant(BitmapSource src, Color fallback) {
       try {
         if (src == null || src.PixelWidth < 2 || src.PixelHeight < 2) return fallback;
@@ -266,36 +251,848 @@ namespace Island {
     public static Color Shade(Color c, double f) {
       return Color.FromRgb((byte)(c.R * f), (byte)(c.G * f), (byte)(c.B * f));
     }
-    // Arc de progression (minuteur)
-    public static Geometry Arc(double size, double thickness, double frac) {
-      frac = Math.Max(0.0001, Math.Min(0.9999, frac));
-      double r = (size - thickness) / 2, c = size / 2, a = frac * 2 * Math.PI;
-      Point p0 = new Point(c, c - r);
-      Point p1 = new Point(c + r * Math.Sin(a), c - r * Math.Cos(a));
-      StreamGeometry g = new StreamGeometry();
-      using (StreamGeometryContext ctx = g.Open()) {
-        ctx.BeginFigure(p0, false, false);
-        ctx.ArcTo(p1, new Size(r, r), 0, frac > 0.5, SweepDirection.Clockwise, true, true);
+  }
+
+  // ===================================================================
+  //  L'application : tout l'affichage tourne ici, en code compilé
+  // ===================================================================
+  public class App {
+    Window win; Hashtable sync; Hashtable cfg;
+    Canvas root, clipHost; Path shape, earL, earR; Border bubble;
+    FrameworkElement compact, toast, peek, expanded;
+    FrameworkElement[] layers;
+    string[] layerNames = { "Compact", "Toast", "Peek", "Expanded" };
+    string layer = "Compact";
+    Spring W, H, R, B;
+    bool running; TimeSpan last;
+    const double WinW = 520, Cx = 260;
+    IntPtr hwnd;
+    string logPath; string lastLog = "";
+    Color accentDefault, timerColor, chargeColor, accent;
+    SolidColorBrush accentBrush;
+    GradientStop tintStop;
+    DropShadowEffect eyeGlow, eyeGlow2;
+    DispatcherTimer tick, hoverTimer;
+    bool expandedOn, mouseIn, typing, hiddenFs, restartPending;
+    DateTime toastUntil = DateTime.MinValue, peekUntil = DateTime.MinValue, restartAt = DateTime.MinValue;
+    DateTime nextBlink = DateTime.Now.AddSeconds(3), nextLook = DateTime.Now.AddSeconds(5), lastPage = DateTime.MinValue;
+    string targetKey = "", tintKey = "", trackKey = "", marqueeText = null, page = "PgToday", compactKey = "", peekKey = "";
+    double compactW = 160; Size peekSize = new Size(300, 60);
+    bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
+    DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
+    double vol = -2; bool muted = false; int battPct = 100; bool? power = null; bool lowWarned = false;
+    string noxMsgId = null; bool noxSeen = false; string noxState = "";
+    double wheelAcc = 0; int tickN = 0;
+    string[] pageNames = { "PgMusic", "PgTimer", "PgNox", "PgToday" };
+    string[] tabNames = { "TabMusic", "TabTimer", "TabNox", "TabToday" };
+    System.Globalization.CultureInfo fr = System.Globalization.CultureInfo.GetCultureInfo("fr-FR");
+
+    public App(Window w, Hashtable s, Hashtable c) {
+      win = w; sync = s; cfg = c;
+      logPath = Str(G(cfg, "logPath"));
+      accentDefault = Rgb(Str(G(cfg, "accent")));
+      timerColor = Rgb(Str(G(cfg, "timerColor")));
+      chargeColor = Rgb(Str(G(cfg, "chargeColor")));
+      accent = accentDefault;
+
+      root = E<Canvas>("Root"); clipHost = E<Canvas>("ClipHost");
+      shape = E<Path>("Shape"); earL = E<Path>("EarL"); earR = E<Path>("EarR"); bubble = E<Border>("Bubble");
+      compact = E<FrameworkElement>("Compact"); toast = E<FrameworkElement>("Toast");
+      peek = E<FrameworkElement>("Peek"); expanded = E<FrameworkElement>("Expanded");
+      layers = new FrameworkElement[] { compact, toast, peek, expanded };
+      foreach (FrameworkElement l in layers) {
+        TransformGroup tg = new TransformGroup();
+        tg.Children.Add(new ScaleTransform(1, 1)); tg.Children.Add(new TranslateTransform(0, 0));
+        l.RenderTransform = tg; l.RenderTransformOrigin = new Point(0.5, 0);
+        Canvas.SetTop(l, 0);
+        if (l != compact) { l.Opacity = 0; l.IsHitTestVisible = false; }
       }
-      g.Freeze(); return g;
+      foreach (string p in pageNames) E<FrameworkElement>(p).RenderTransform = new TranslateTransform(0, 0);
+
+      // pinceaux vivants
+      accentBrush = new SolidColorBrush(accentDefault);
+      foreach (string e in new[] { "Eq1", "Eq2", "Eq3", "Eq4", "Eq5", "Eq6", "Eq7", "Eq8" }) E<Shape>(e).Fill = accentBrush;
+      E<Border>("EBar").Background = accentBrush;
+      E<TextBlock>("EApp").Foreground = accentBrush;
+      LinearGradientBrush bg = new LinearGradientBrush();
+      bg.StartPoint = new Point(0.5, 0); bg.EndPoint = new Point(0.5, 1);
+      bg.GradientStops.Add(new GradientStop(Colors.Black, 0));
+      bg.GradientStops.Add(new GradientStop(Colors.Black, 0.5));
+      tintStop = new GradientStop(Colors.Black, 1);
+      bg.GradientStops.Add(tintStop);
+      bg.MappingMode = BrushMappingMode.RelativeToBoundingBox;
+      shape.Fill = bg;
+      earL.Fill = Brushes.Black; earR.Fill = Brushes.Black;
+      eyeGlow = new DropShadowEffect { BlurRadius = 8, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
+      eyeGlow2 = new DropShadowEffect { BlurRadius = 12, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
+      E<FrameworkElement>("CEyes").Effect = eyeGlow;
+      E<FrameworkElement>("NEyes").Effect = eyeGlow2;
+      E<FrameworkElement>("BEyes").Effect = eyeGlow;
+
+      W = new Spring(160); H = new Spring(34); R = new Spring(16); B = new Spring(0);
+      Apply();
+
+      // survol : ouverture rapide, fermeture un peu retardée
+      hoverTimer = new DispatcherTimer(DispatcherPriority.Normal, win.Dispatcher);
+      hoverTimer.Tick += delegate { hoverTimer.Stop(); SetExpanded(mouseIn || typing); };
+      win.MouseEnter += delegate { mouseIn = true; Hover(); };
+      win.MouseLeave += delegate { mouseIn = false; Hover(); };
+      win.PreviewMouseLeftButtonDown += delegate { Squish(0.97, 90); };
+      win.PreviewMouseLeftButtonUp += delegate { Squish(1, 320); };
+
+      // boutons
+      Click("BPlay", delegate { Cmd("play"); });
+      Click("BNext", delegate { Cmd("next"); });
+      Click("BPrev", delegate { Cmd("prev"); });
+      Click("BT25", delegate { StartTimer(25, "Focus"); });
+      Click("BT5", delegate { StartTimer(5, "Pause"); });
+      Click("BTStop", delegate { timerEnd = null; UpdateTimer(); Refresh(); });
+      for (int i = 0; i < tabNames.Length; i++) {
+        string target = pageNames[i];
+        Click(tabNames[i], delegate { GoPage(target); });
+      }
+      E<FrameworkElement>("EBarHit").MouseLeftButtonUp += SeekClick;
+      Click("BSend", delegate { SendNox(); });
+      Click("BConfOk", delegate { Confirm(true); });
+      Click("BConfNo", delegate { Confirm(false); });
+      Click("BPeekOk", delegate { Confirm(true); peekUntil = DateTime.MinValue; Refresh(); });
+      Click("BPeekNo", delegate { Confirm(false); peekUntil = DateTime.MinValue; Refresh(); });
+      TextBox input = E<TextBox>("NInput");
+      input.PreviewMouseLeftButtonDown += delegate { StartTyping(); };
+      input.TextChanged += delegate { E<UIElement>("NPh").Visibility = input.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed; };
+      input.KeyDown += delegate(object o, KeyEventArgs ev) {
+        if (ev.Key == Key.Enter) { SendNox(); ev.Handled = true; }
+        else if (ev.Key == Key.Escape) { StopTyping(); ev.Handled = true; }
+      };
+      win.Deactivated += delegate { if (typing) StopTyping(); };
+      input.LostKeyboardFocus += delegate { if (typing) StopTyping(); };
+
+      // menu clic droit
+      ContextMenu menu = new ContextMenu();
+      menu.Items.Add(new MenuItem { Header = "Dynamic Island v" + G(cfg, "version"), IsEnabled = false });
+      menu.Items.Add(new MenuItem { Header = "Mises à jour automatiques (GitHub)", IsEnabled = false });
+      menu.Items.Add(new Separator());
+      MenuItem miLog = new MenuItem { Header = "Ouvrir le journal" };
+      miLog.Click += delegate { try { System.Diagnostics.Process.Start("notepad.exe", "\"" + logPath + "\""); } catch { } };
+      MenuItem miRestart = new MenuItem { Header = "Redémarrer" };
+      miRestart.Click += delegate { sync["restart"] = true; win.Close(); };
+      MenuItem miQuit = new MenuItem { Header = "Quitter" };
+      miQuit.Click += delegate { win.Close(); };
+      menu.Items.Add(miLog); menu.Items.Add(miRestart); menu.Items.Add(miQuit);
+      win.ContextMenu = menu;
+
+      win.SourceInitialized += delegate {
+        hwnd = new WindowInteropHelper(win).Handle;
+        Win.NoActivate(hwnd, true);
+        HwndSource src = HwndSource.FromHwnd(hwnd);
+        if (src != null) src.AddHook(WndProc);
+        Log("fenêtre créée");
+      };
+      win.ContentRendered += delegate { Log("fenêtre affichée à l'écran"); };
+      win.Dispatcher.UnhandledException += delegate(object s2, DispatcherUnhandledExceptionEventArgs ue) { Log("erreur : " + ue.Exception.Message); ue.Handled = true; };
+      Place();
+
+      tick = new DispatcherTimer(DispatcherPriority.Background, win.Dispatcher);
+      tick.Interval = TimeSpan.FromMilliseconds(100);
+      tick.Tick += delegate { Safe("cycle", Tick); };
+      UpdateBattery(); UpdateTimer(); ShowPage("PgToday", 0);
+      tick.Start();
+      Log("interface prête (code compilé)");
+    }
+
+    // ---------------- utilitaires ----------------
+    T E<T>(string n) where T : class {
+      object o = win.FindName(n);
+      if (o == null) throw new Exception("élément introuvable : " + n);
+      return (T)o;
+    }
+    void Click(string n, RoutedEventHandler h) { E<Button>(n).Click += h; }
+    static Color Rgb(string hex) { return (Color)ColorConverter.ConvertFromString(hex); }
+    static SolidColorBrush Br(string hex) { SolidColorBrush b = new SolidColorBrush(Rgb(hex)); b.Freeze(); return b; }
+    static SolidColorBrush Br(Color c) { SolidColorBrush b = new SolidColorBrush(c); b.Freeze(); return b; }
+    public void Log(string m) {
+      if (m == lastLog) return; lastLog = m;
+      try { System.IO.File.AppendAllText(logPath, DateTime.Now.ToString("HH:mm:ss") + " UI  " + m + Environment.NewLine, System.Text.Encoding.UTF8); } catch { }
+    }
+    void Safe(string what, Action a) { try { a(); } catch (Exception ex) { Log(what + " : " + ex.Message); } }
+    static object U(object o) { PSObject p = o as PSObject; return p != null ? p.BaseObject : o; }
+    static object G(Hashtable h, string k) { return h == null ? null : U(h[k]); }
+    static string Str(object o) { return o == null ? "" : o.ToString(); }
+    static bool Bool(object o) { o = U(o); return o is bool && (bool)o; }
+    static double Num(object o) { o = U(o); try { return o == null ? 0 : Convert.ToDouble(o); } catch { return 0; } }
+
+    static void Anim(Animatable target, DependencyProperty p, double to, int ms, int delay, IEasingFunction ease) {
+      DoubleAnimation a = new DoubleAnimation(to, TimeSpan.FromMilliseconds(ms));
+      if (delay > 0) a.BeginTime = TimeSpan.FromMilliseconds(delay);
+      a.EasingFunction = ease ?? new CubicEase { EasingMode = EasingMode.EaseOut };
+      target.BeginAnimation(p, a);
+    }
+    static void Anim(UIElement target, DependencyProperty p, double to, int ms, int delay, IEasingFunction ease) {
+      DoubleAnimation a = new DoubleAnimation(to, TimeSpan.FromMilliseconds(ms));
+      if (delay > 0) a.BeginTime = TimeSpan.FromMilliseconds(delay);
+      a.EasingFunction = ease ?? new CubicEase { EasingMode = EasingMode.EaseOut };
+      target.BeginAnimation(p, a);
+    }
+    static IEasingFunction Quint() { return new QuinticEase { EasingMode = EasingMode.EaseOut }; }
+    static IEasingFunction Back(double amp) { return new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = amp }; }
+    static void AnimColor(Animatable target, DependencyProperty p, Color to, int ms) {
+      ColorAnimation a = new ColorAnimation(to, TimeSpan.FromMilliseconds(ms));
+      a.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
+      target.BeginAnimation(p, a);
+    }
+
+    void Place() {
+      Rect wa = SystemParameters.WorkArea;
+      win.Left = wa.Left + (wa.Width - win.Width) / 2;
+      win.Top = 0;
+    }
+
+    // ---------------- forme (ressorts, image par image) ----------------
+    void MorphTo(double w, double h, double r, double resp, double damp) {
+      W.Target = w; H.Target = h; R.Target = r;
+      W.Response = resp; H.Response = resp * 1.06; R.Response = resp;
+      W.Damping = damp; H.Damping = damp; R.Damping = Math.Min(1, damp + 0.1);
+      StartFrames();
+    }
+    void BubbleTo(double s) { B.Target = s; B.Response = 0.45; B.Damping = 0.7; StartFrames(); }
+    void StartFrames() { if (!running) { running = true; last = TimeSpan.Zero; CompositionTarget.Rendering += OnFrame; } }
+    void OnFrame(object s, EventArgs e) {
+      RenderingEventArgs re = e as RenderingEventArgs;
+      double dt = 1.0 / 60;
+      if (re != null) {
+        if (re.RenderingTime == last) return;   // même image, déjà calculée
+        if (last != TimeSpan.Zero) dt = (re.RenderingTime - last).TotalSeconds;
+        last = re.RenderingTime;
+      }
+      if (dt <= 0) return;
+      if (dt > 0.034) dt = 0.034;
+      int n = (int)Math.Ceiling(dt / 0.004); double st = dt / n;
+      for (int i = 0; i < n; i++) { W.Step(st); H.Step(st); R.Step(st); B.Step(st); }
+      if (W.Settled && H.Settled && R.Settled && B.Settled) {
+        W.Snap(); H.Snap(); R.Snap(); B.Snap();
+        CompositionTarget.Rendering -= OnFrame; running = false;
+      }
+      Apply();
+    }
+    void Apply() {
+      double w = Math.Max(24, W.Value), h = Math.Max(20, H.Value), r = Math.Max(0, R.Value);
+      double x = Cx - w / 2;
+      Geometry g = Fx.Notch(x, w, h, r);
+      shape.Data = g;
+      clipHost.Clip = g;
+      ((TranslateTransform)earL.RenderTransform).X = x - 12;
+      ((TranslateTransform)earR.RenderTransform).X = x + w;
+      double b = Math.Max(0, B.Value);
+      bubble.Width = b; bubble.Height = b; bubble.CornerRadius = new CornerRadius(b / 2);
+      bubble.Opacity = Math.Max(0, Math.Min(1, b / 30));
+      ((TranslateTransform)bubble.RenderTransform).X = x + w + 18;
+      bubble.Visibility = b < 0.5 ? Visibility.Collapsed : Visibility.Visible;
+    }
+    void Squish(double s, int ms) {
+      ScaleTransform st = (ScaleTransform)root.RenderTransform;
+      IEasingFunction e = s < 1 ? null : Back(0.4);
+      Anim(st, ScaleTransform.ScaleXProperty, s, ms, 0, e);
+      Anim(st, ScaleTransform.ScaleYProperty, s, ms, 0, e);
+    }
+
+    // ---------------- couches ----------------
+    void ShowLayer(string name, double width) {
+      for (int i = 0; i < layers.Length; i++) {
+        FrameworkElement l = layers[i];
+        bool on = layerNames[i] == name;
+        if (on && !double.IsNaN(width)) { l.Width = width; Canvas.SetLeft(l, Cx - width / 2); }
+      }
+      if (name == layer) return;
+      layer = name;
+      for (int i = 0; i < layers.Length; i++) {
+        FrameworkElement l = layers[i];
+        bool on = layerNames[i] == name;
+        ScaleTransform sc = (ScaleTransform)((TransformGroup)l.RenderTransform).Children[0];
+        l.IsHitTestVisible = on;
+        if (on) {
+          l.BeginAnimation(UIElement.OpacityProperty, null); l.Opacity = 0;
+          sc.BeginAnimation(ScaleTransform.ScaleXProperty, null); sc.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+          sc.ScaleX = 0.9; sc.ScaleY = 0.9;
+          Anim(l, UIElement.OpacityProperty, 1, 200, 45, null);
+          Anim(sc, ScaleTransform.ScaleXProperty, 1, 420, 20, Back(0.35));
+          Anim(sc, ScaleTransform.ScaleYProperty, 1, 420, 20, Back(0.35));
+        } else {
+          Anim(l, UIElement.OpacityProperty, 0, 90, 0, null);
+          Anim(sc, ScaleTransform.ScaleXProperty, 0.95, 120, 0, null);
+          Anim(sc, ScaleTransform.ScaleYProperty, 0.95, 120, 0, null);
+        }
+      }
+    }
+    Size Natural(FrameworkElement el, double width) {
+      el.Width = width;
+      el.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+      return el.DesiredSize;
+    }
+
+    // ---------------- survol / clavier ----------------
+    void Hover() {
+      hoverTimer.Stop();
+      bool want = mouseIn || typing;
+      if (want == expandedOn) return;
+      hoverTimer.Interval = TimeSpan.FromMilliseconds(want ? 60 : 160);
+      hoverTimer.Start();
+    }
+    void SetExpanded(bool on) {
+      if (on == expandedOn) return;
+      expandedOn = on;
+      if (on) {
+        bool playing = Playing();
+        if (DateTime.Now < peekUntil && (peekIsConfirm || E<TextBlock>("PApp").Text == "Nox")) { peekUntil = DateTime.MinValue; ShowPage("PgNox", 0); }
+        else if (playing) ShowPage("PgMusic", 0);
+        else if (timerEnd.HasValue) ShowPage("PgTimer", 0);
+        else if (page == "PgMusic" && !HasMedia()) ShowPage("PgToday", 0);
+        else ShowPage(page, 0);
+      }
+      Refresh();
+    }
+    void StartTyping() {
+      if (typing) return;
+      typing = true;
+      Win.NoActivate(hwnd, false);
+      win.Activate(); Win.SetForegroundWindow(hwnd);
+      E<TextBox>("NInput").Focus();
+      Hover();
+    }
+    void StopTyping() {
+      if (!typing) return;
+      typing = false;
+      Keyboard.ClearFocus();
+      Win.NoActivate(hwnd, true);
+      Hover();
+    }
+
+    IntPtr WndProc(IntPtr h, int msg, IntPtr wParam, IntPtr lParam, ref bool handled) {
+      if (msg == 0x020A || msg == 0x020E) {   // molette verticale / horizontale (pavé tactile)
+        if (expandedOn) {
+          int delta = (short)((wParam.ToInt64() >> 16) & 0xFFFF);
+          double d = msg == 0x020A ? -delta : delta;   // vers le bas ou vers la droite = page suivante
+          wheelAcc += d;
+          if ((DateTime.Now - lastPage).TotalMilliseconds > 380 && Math.Abs(wheelAcc) >= 100) {
+            NextPage(wheelAcc > 0 ? 1 : -1);
+            wheelAcc = 0; lastPage = DateTime.Now;
+          }
+          if ((DateTime.Now - lastPage).TotalMilliseconds <= 380) wheelAcc = 0;
+          handled = true;
+        }
+      }
+      return IntPtr.Zero;
+    }
+
+    // ---------------- pages ----------------
+    List<string> PageList() {
+      List<string> l = new List<string>();
+      if (HasMedia()) l.Add("PgMusic");
+      l.Add("PgTimer"); l.Add("PgNox"); l.Add("PgToday");
+      return l;
+    }
+    void GoPage(string p) {
+      List<string> l = PageList();
+      int a = l.IndexOf(page), b = l.IndexOf(p);
+      if (b < 0 || p == page) return;
+      ShowPage(p, b > a ? 1 : -1);
+      Refresh();
+    }
+    void NextPage(int dir) {
+      List<string> l = PageList();
+      int i = Math.Max(0, l.IndexOf(page)), j = i + dir;
+      if (j < 0 || j >= l.Count) {   // petit rebond en bout de liste
+        TranslateTransform t = (TranslateTransform)E<FrameworkElement>(page).RenderTransform;
+        t.BeginAnimation(TranslateTransform.XProperty, null); t.X = -10 * dir;
+        Anim(t, TranslateTransform.XProperty, 0, 320, 0, Back(0.6));
+        return;
+      }
+      ShowPage(l[j], dir);
+      Refresh();
+    }
+    void ShowPage(string name, int dir) {
+      foreach (string p in pageNames) {
+        FrameworkElement el = E<FrameworkElement>(p);
+        if (p == name) {
+          el.Visibility = Visibility.Visible;
+          if (dir != 0) {
+            TranslateTransform t = (TranslateTransform)el.RenderTransform;
+            t.BeginAnimation(TranslateTransform.XProperty, null); t.X = 40 * dir;
+            Anim(t, TranslateTransform.XProperty, 0, 380, 0, Quint());
+            el.BeginAnimation(UIElement.OpacityProperty, null); el.Opacity = 0;
+            Anim(el, UIElement.OpacityProperty, 1, 220, 0, null);
+          }
+        } else el.Visibility = Visibility.Collapsed;
+      }
+      page = name;
+      List<string> l = PageList();
+      for (int i = 0; i < tabNames.Length; i++) {
+        Button tb = E<Button>(tabNames[i]);
+        bool avail = l.Contains(pageNames[i]);
+        tb.Visibility = avail ? Visibility.Visible : Visibility.Collapsed;
+        bool on = pageNames[i] == name;
+        tb.Background = on ? Br("#26FFFFFF") : Brushes.Transparent;
+        tb.Foreground = on ? (Brush)Br("#FFFFFF") : Br("#8E8E93");
+      }
+    }
+
+    // ---------------- données ----------------
+    Hashtable Media() { return G(sync, "media") as Hashtable; }
+    bool HasMedia() { return Media() != null; }
+    bool Playing() { return HasMedia() && Bool(G(sync, "playing")); }
+    void Cmd(string c) {
+      System.Collections.Concurrent.ConcurrentQueue<string> q = G(sync, "cmds") as System.Collections.Concurrent.ConcurrentQueue<string>;
+      if (q != null) q.Enqueue(c); else Log("file de commandes introuvable");
+    }
+    void NoxCmd(string c) {
+      System.Collections.Concurrent.ConcurrentQueue<string> q = G(sync, "noxcmds") as System.Collections.Concurrent.ConcurrentQueue<string>;
+      if (q != null) q.Enqueue(c); else Log("file Nox introuvable");
+    }
+
+    void Tick() {
+      tickN++;
+      DateTime now = DateTime.Now;
+      if (tickN % 60 == 0) Audio.Reset();
+      Safe("volume", UpdateVolume);
+      Safe("musique", UpdateMedia);
+      if (tickN % 5 == 1) Safe("minuteur", UpdateTimer);
+      if (tickN % 10 == 1) {
+        Safe("batterie", delegate { if (!ringIsTimer) UpdateBattery(); });
+        Safe("nox", UpdateNox);
+        Safe("plein écran", CheckFullscreen);
+        Rect wa = SystemParameters.WorkArea;
+        if (Math.Abs(win.Left - (wa.Left + (wa.Width - win.Width) / 2)) > 1) Place();
+      }
+      if (G(sync, "updated") != null && !restartPending) {
+        restartPending = true; restartAt = now.AddSeconds(4);
+        ShowPeek(null, "", "#FFFFFF", Str(G(cfg, "chargeColor")), "Dynamic Island", "Mise à jour v" + Str(G(sync, "updated")), "Redémarrage…", 4000, false);
+      }
+      if (restartPending && now >= restartAt && !expandedOn && !typing) { sync["restart"] = true; win.Close(); return; }
+      if (tickN == 30 || tickN % 3000 == 0)
+        Log(string.Format("diag : couche={0} page={1} forme={2:0}x{3:0} musique={4} nox={5}", layer, page, W.Value, H.Value, HasMedia(), noxState));
+      Refresh();
+    }
+
+    // ---------------- état -> forme ----------------
+    void Refresh() {
+      DateTime now = DateTime.Now;
+      bool hasMedia = HasMedia(), playing = Playing(), timerOn = timerEnd.HasValue;
+      string clock = now.ToString("HH:mm");
+      E<TextBlock>("CClock").Text = clock; E<TextBlock>("EClock").Text = clock;
+      E<TextBlock>("EDate").Text = fr.TextInfo.ToTitleCase(now.ToString("dddd d MMMM", fr));
+
+      double w, h, r, resp, damp, bub = 0; string name;
+      if (expandedOn) {
+        name = "Expanded";
+        List<string> l = PageList();
+        if (!l.Contains(page)) ShowPage("PgToday", 0);
+        Size s = Natural(expanded, 440);
+        w = 440; h = Math.Ceiling(s.Height); r = 30; resp = 0.42; damp = 0.8;
+      } else if (now < toastUntil) {
+        name = "Toast"; w = 300; h = 34; r = 16; resp = 0.32; damp = 0.82;
+      } else if (now < peekUntil) {
+        name = "Peek";
+        string pk = E<TextBlock>("PTitle").Text + "|" + E<TextBlock>("PSub").Text + "|" + E<TextBlock>("PApp").Text + "|" + peekIsConfirm;
+        if (pk != peekKey) { peekKey = pk; peekSize = Natural(peek, double.NaN); }
+        w = Math.Ceiling(peekSize.Width); h = Math.Ceiling(peekSize.Height); r = 26; resp = 0.4; damp = 0.8;
+      } else {
+        name = "Compact";
+        bool music = playing;
+        bool noxBusy = noxState == "busy";
+        Vis("CArtBox", music); Vis("CTitleBox", music); Vis("CEq", music);
+        Vis("CRingBox", !music && (timerOn || battPct >= 0)); Vis("CTimer", timerOn && !music); Vis("CClock", !music && !timerOn); Vis("CEyes", !music);
+        if (timerOn && !music) {
+          Path ring = E<Path>("CRing");
+          ring.Stroke = Br(timerColor);
+          ring.Data = Fx.Arc(17, 2.5, (timerEnd.Value - now).TotalSeconds / timerTotal);
+          ringIsTimer = true;
+        } else if (ringIsTimer) { ringIsTimer = false; UpdateBattery(); }
+        string ck = music + "|" + timerOn + "|" + clock + "|" + E<TextBlock>("CTimer").Text + "|" + E<FrameworkElement>("CTitleBox").Width;
+        if (ck != compactKey) { compactKey = ck; compactW = Math.Max(150, Math.Ceiling(Natural(compact, double.NaN).Width)); }
+        w = compactW; h = 34; r = 16; resp = 0.34; damp = 0.86;
+        if (music && timerOn) { bub = 32; Vis("BRing", true); Vis("BEyes", false); }
+        else if (music && noxBusy) { bub = 32; Vis("BRing", false); Vis("BEyes", true); }
+      }
+      SetEq(playing);
+      if (!playing || expandedOn || bub > 0) UpdateEyes(now);
+
+      string key = name + "|" + w + "|" + h + "|" + bub;
+      ShowLayer(name, w);
+      if (key != targetKey) {
+        targetKey = key;
+        MorphTo(w, h, r, resp, damp);
+        BubbleTo(bub);
+      }
+
+      // teinte du bas : pochette quand ça joue, violet de Nox sinon
+      Color col = accentDefault; double level;
+      if (hasMedia && (playing || name == "Expanded")) { col = accent; level = name == "Compact" ? 0.42 : 0.5; }
+      else level = name == "Compact" ? 0.26 : (name == "Expanded" ? 0.34 : 0.18);
+      string tk = level + "|" + col;
+      if (tk != tintKey) { tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450); }
+    }
+    void Vis(string n, bool on) { E<UIElement>(n).Visibility = on ? Visibility.Visible : Visibility.Collapsed; }
+
+    void SetEq(bool on) {
+      if (eqOn == on) return;
+      eqOn = on;
+      int[] durs = { 330, 450, 380, 520, 360, 470, 400, 540 };
+      string[] names = { "Eq1", "Eq2", "Eq3", "Eq4", "Eq5", "Eq6", "Eq7", "Eq8" };
+      for (int i = 0; i < names.Length; i++) {
+        ScaleTransform st = (ScaleTransform)E<UIElement>(names[i]).RenderTransform;
+        if (on) {
+          DoubleAnimation a = new DoubleAnimation(0.25, 1.0, TimeSpan.FromMilliseconds(durs[i]));
+          a.AutoReverse = true; a.RepeatBehavior = RepeatBehavior.Forever;
+          a.EasingFunction = new SineEase();
+          Timeline.SetDesiredFrameRate(a, 30);   // économise la batterie et la fluidité du reste
+          st.BeginAnimation(ScaleTransform.ScaleYProperty, a);
+        } else Anim(st, ScaleTransform.ScaleYProperty, 0.3, 200, 0, null);
+      }
+    }
+
+    // ---------------- yeux de Nox ----------------
+    void UpdateEyes(DateTime now) {
+      if (now >= nextBlink) {
+        foreach (string e in new[] { "EyeL", "EyeR", "NEyeL", "NEyeR", "BEyeL", "BEyeR" }) {
+          DoubleAnimationUsingKeyFrames a = new DoubleAnimationUsingKeyFrames();
+          a.KeyFrames.Add(new LinearDoubleKeyFrame(1.0, KeyTime.FromTimeSpan(TimeSpan.Zero)));
+          a.KeyFrames.Add(new EasingDoubleKeyFrame(0.1, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(70))));
+          a.KeyFrames.Add(new EasingDoubleKeyFrame(1.0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(180))));
+          ((ScaleTransform)E<UIElement>(e).RenderTransform).BeginAnimation(ScaleTransform.ScaleYProperty, a);
+        }
+        Random rnd = new Random();
+        nextBlink = rnd.Next(5) == 0 ? now.AddMilliseconds(260) : now.AddMilliseconds(rnd.Next(2500, 6500));
+      }
+      bool busy = noxState == "busy";
+      if (now >= nextLook) {
+        Random rnd = new Random();
+        double[] xs = busy ? new[] { -2.5, 2.5 } : new[] { -2.5, 0, 0, 2.5 };
+        double x = busy ? (((TranslateTransform)E<UIElement>("CEyes").RenderTransform).X > 0 ? -2.5 : 2.5) : xs[rnd.Next(xs.Length)];
+        foreach (string e in new[] { "CEyes", "NEyes" })
+          Anim((TranslateTransform)E<UIElement>(e).RenderTransform, TranslateTransform.XProperty, x * (e == "NEyes" ? 1.6 : 1), 280, 0, Quint());
+        nextLook = busy ? now.AddMilliseconds(700) : now.AddMilliseconds(rnd.Next(3000, 8000));
+      }
+    }
+
+    // ---------------- titre qui défile ----------------
+    void SetMarquee(string text) {
+      if (text == marqueeText) return;
+      marqueeText = text;
+      TextBlock t = E<TextBlock>("CTitle");
+      TranslateTransform tr = (TranslateTransform)t.RenderTransform;
+      t.Text = text;
+      tr.BeginAnimation(TranslateTransform.XProperty, null); tr.X = 0;
+      t.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+      double tw = Math.Ceiling(t.DesiredSize.Width), max = 150;
+      E<FrameworkElement>("CTitleBox").Width = Math.Min(tw, max);
+      if (tw > max) {
+        double dist = tw - max, scroll = Math.Max(1.5, dist / 28.0);
+        double t1 = 2.2, t2 = t1 + scroll, t3 = t2 + 1.8, t4 = t3 + 0.5;
+        DoubleAnimationUsingKeyFrames a = new DoubleAnimationUsingKeyFrames();
+        a.RepeatBehavior = RepeatBehavior.Forever;
+        a.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromSeconds(t1))));
+        a.KeyFrames.Add(new LinearDoubleKeyFrame(-dist, KeyTime.FromTimeSpan(TimeSpan.FromSeconds(t2))));
+        a.KeyFrames.Add(new LinearDoubleKeyFrame(-dist, KeyTime.FromTimeSpan(TimeSpan.FromSeconds(t3))));
+        a.KeyFrames.Add(new EasingDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromSeconds(t4))));
+        Timeline.SetDesiredFrameRate(a, 40);
+        tr.BeginAnimation(TranslateTransform.XProperty, a);
+      }
+    }
+
+    // ---------------- toast / notification ----------------
+    void ShowToast(string icon, string text, string right, Color color, double bar, int ms) {
+      E<TextBlock>("TIco").Text = icon; E<TextBlock>("TIco").Foreground = Br(color);
+      E<TextBlock>("TRight").Text = right;
+      if (bar >= 0) {
+        Vis("TText", false); Vis("TBarBg", true);
+        Border b = E<Border>("TBar");
+        b.Background = Br(color);
+        Anim(b, FrameworkElement.WidthProperty, Math.Max(0, Math.Min(1, bar)) * 170, 140, 0, null);
+      } else { Vis("TText", true); Vis("TBarBg", false); E<TextBlock>("TText").Text = text; }
+      toastUntil = DateTime.Now.AddMilliseconds(ms);
+    }
+    void ShowPeek(ImageSource art, string icon, string iconColor, string iconBg, string app, string title, string sub, int ms, bool confirm) {
+      SetArt("PArtBox", art);
+      E<TextBlock>("PIco").Text = art == null ? icon : "";
+      E<TextBlock>("PIco").Foreground = Br(iconColor);
+      if (art == null) E<Border>("PArtBox").Background = Br(iconBg ?? "#2C2C2E");
+      E<TextBlock>("PApp").Text = app;
+      E<TextBlock>("PTitle").Text = title;
+      E<TextBlock>("PSub").Text = sub ?? "";
+      Vis("PSub", !string.IsNullOrEmpty(sub));
+      Vis("PButtons", confirm);
+      peekIsConfirm = confirm;
+      peekUntil = DateTime.Now.AddMilliseconds(ms);
+    }
+    void SetArt(string box, ImageSource art) {
+      Border b = E<Border>(box);
+      if (art != null) { ImageBrush ib = new ImageBrush(art); ib.Stretch = Stretch.UniformToFill; ib.Freeze(); b.Background = ib; }
+      else b.Background = Br("#1C1C1E");
+    }
+
+    // ---------------- batterie / volume / plein écran ----------------
+    static string BattGlyph(int pct, bool charging) {
+      int i = (int)Math.Round(pct / 10.0);
+      if (charging) return i >= 10 ? "" : (i == 9 ? "" : ((char)(0xE85A + i)).ToString());
+      return i >= 10 ? "" : ((char)(0xE850 + i)).ToString();
+    }
+    void UpdateBattery() {
+      bool online; int pct = Win.Battery(out online);
+      if (pct < 0) { battPct = -1; Vis("CRingBox", false); return; }
+      battPct = pct;
+      string g = BattGlyph(pct, online);
+      Color col = online ? chargeColor : (pct <= 20 ? Rgb("#FF453A") : Rgb("#F2F2F7"));
+      Path ring = E<Path>("CRing");
+      ring.Stroke = Br(col); ring.Data = Fx.Arc(17, 2.5, pct / 100.0);
+      E<TextBlock>("EBattIco").Text = g; E<TextBlock>("EBattIco").Foreground = Br(col);
+      E<TextBlock>("EBattTxt").Text = online ? pct + " % · en charge" : pct + " %";
+      if (power.HasValue && power.Value != online)
+        ShowToast(g, online ? "En charge" : "Sur batterie", pct + "%", online ? chargeColor : Colors.White, -1, 2000);
+      power = online;
+      if (!online && pct <= 20 && !lowWarned) { lowWarned = true; ShowToast(g, "Batterie faible", pct + "%", Rgb("#FF453A"), -1, 3500); }
+      if (online) lowWarned = false;
+    }
+    static string VolGlyph(int pct, bool m) {
+      if (m) return "";
+      return pct == 0 ? "" : (pct < 34 ? "" : (pct < 67 ? "" : ""));
+    }
+    void UpdateVolume() {
+      double v = Audio.Level();
+      if (v < 0) return;
+      bool m = Audio.Muted();
+      bool changed = vol >= 0 && (Math.Abs(v - vol) > 0.004 || m != muted);
+      vol = v; muted = m;
+      int pct = (int)Math.Round(v * 100);
+      string ico = VolGlyph(pct, m);
+      E<TextBlock>("EVolIco").Text = ico; E<TextBlock>("EVolTxt").Text = m ? "muet" : pct + " %";
+      if (changed) {
+        if (m) ShowToast(ico, "", "Muet", Rgb("#8E8E93"), 0, 1400);
+        else ShowToast(ico, "", pct.ToString(), Colors.White, v, 1400);
+        Refresh();
+      }
+    }
+    void CheckFullscreen() {
+      if (!Bool(G(cfg, "hideFullscreen")) || hwnd == IntPtr.Zero) return;
+      int sw = (int)Math.Round(SystemParameters.PrimaryScreenWidth), sh = (int)Math.Round(SystemParameters.PrimaryScreenHeight);
+      // GetWindowRect renvoie des pixels physiques : on compare avec la taille physique de l'écran
+      PresentationSource ps = PresentationSource.FromVisual(win);
+      if (ps != null && ps.CompositionTarget != null) {
+        Matrix mx = ps.CompositionTarget.TransformToDevice;
+        sw = (int)Math.Round(SystemParameters.PrimaryScreenWidth * mx.M11); sh = (int)Math.Round(SystemParameters.PrimaryScreenHeight * mx.M22);
+      }
+      bool fs = Win.ForegroundIsFullscreen(sw, sh, hwnd);
+      if (fs == hiddenFs) return;
+      hiddenFs = fs;
+      Anim(root, UIElement.OpacityProperty, fs ? 0 : 1, 220, 0, null);
+      root.IsHitTestVisible = !fs;
+    }
+
+    // ---------------- musique ----------------
+    static string AppName(string id) {
+      if (string.IsNullOrEmpty(id)) return "";
+      string l = id.ToLowerInvariant();
+      if (l.Contains("spotify")) return "Spotify";
+      if (l.Contains("chrome")) return "Chrome";
+      if (l.Contains("msedge")) return "Edge";
+      if (l.Contains("firefox")) return "Firefox";
+      if (l.Contains("deezer")) return "Deezer";
+      if (l.Contains("zune") || l.Contains("media")) return "Lecteur multimédia";
+      string[] parts = id.Split('\\', '!');
+      return parts[parts.Length - 1].Replace(".exe", "");
+    }
+    static string Fmt(double sec) {
+      if (sec < 0) sec = 0;
+      TimeSpan t = TimeSpan.FromSeconds(Math.Floor(sec));
+      return t.TotalHours >= 1 ? t.ToString(@"h\:mm\:ss") : string.Format("{0}:{1:00}", (int)Math.Floor(t.TotalMinutes), t.Seconds);
+    }
+    void UpdateMedia() {
+      Hashtable md = Media();
+      if (md != null && Str(G(md, "key")) != trackKey) {
+        trackKey = Str(G(md, "key"));
+        ImageSource art = G(md, "art") as ImageSource;
+        SetArt("CArtBox", art); SetArt("EArtBox", art);
+        Vis("EArtIco", art == null);
+        string title = Str(G(md, "title")), artist = Str(G(md, "artist")), app = AppName(Str(G(md, "app")));
+        E<TextBlock>("ETitle").Text = title; E<TextBlock>("EArtist").Text = artist; E<TextBlock>("EApp").Text = app;
+        SetMarquee(string.IsNullOrEmpty(artist) ? title : title + " · " + artist);
+        if (G(md, "color") is Color) { accent = (Color)G(md, "color"); AnimColor(accentBrush, SolidColorBrush.ColorProperty, accent, 600); }
+        if (!firstTrack && Bool(G(sync, "playing")) && !expandedOn) ShowPeek(art, "", "#FFFFFF", "#1C1C1E", app, title, artist, 3000, false);
+        firstTrack = false;
+      }
+      if (md == null) trackKey = "";
+      E<TextBlock>("BPlayIco").Text = Bool(G(sync, "playing")) ? "" : "";
+      Hashtable tl = G(sync, "timeline") as Hashtable;
+      if (md != null && tl != null && Num(G(tl, "end")) > 1) {
+        double end = Num(G(tl, "end")), cur = Num(G(tl, "pos"));
+        if (Bool(G(sync, "playing")) && G(tl, "at") is DateTime) cur += (DateTime.Now - (DateTime)G(tl, "at")).TotalSeconds;
+        cur = Math.Min(cur, end);
+        Vis("EProg", true);
+        E<ScaleTransform>("EBarScale").ScaleX = Math.Max(0, Math.Min(1, cur / end));
+        E<TextBlock>("EPos").Text = Fmt(cur);
+        E<TextBlock>("ELeft").Text = "-" + Fmt(end - cur);
+      } else Vis("EProg", false);
+    }
+    void SeekClick(object o, MouseButtonEventArgs ev) {
+      Hashtable tl = G(sync, "timeline") as Hashtable;
+      FrameworkElement hit = E<FrameworkElement>("EBarHit");
+      if (tl == null || Num(G(tl, "end")) <= 1 || hit.ActualWidth <= 0) return;
+      double frac = Math.Max(0, Math.Min(0.995, ev.GetPosition(hit).X / hit.ActualWidth));
+      double end = Num(G(tl, "end"));
+      int ms = (int)(frac * end * 1000);
+      Hashtable md = Media();
+      bool spotify = md != null && AppName(Str(G(md, "app"))) == "Spotify";
+      Cmd((spotify ? "seekspotify:" : "seek:") + ms);
+      Hashtable n = new Hashtable(); n["pos"] = frac * end; n["end"] = end; n["at"] = DateTime.Now;
+      sync["timeline"] = n;
+      ev.Handled = true;
+    }
+
+    // ---------------- minuteur ----------------
+    void StartTimer(int min, string label) { timerEnd = DateTime.Now.AddMinutes(min); timerTotal = min * 60; timerLabel = label; UpdateTimer(); Refresh(); }
+    void UpdateTimer() {
+      if (!timerEnd.HasValue) {
+        E<TextBlock>("CTimer").Text = "";
+        E<Path>("TRing").Data = null; E<TextBlock>("TRingTxt").Text = "25:00";
+        E<TextBlock>("TLabel").Text = "Minuteur"; E<TextBlock>("TSub").Text = "Prêt quand tu l'es";
+        Vis("BTStop", false); Vis("BT25", true); Vis("BT5", true);
+        return;
+      }
+      TimeSpan left = timerEnd.Value - DateTime.Now;
+      if (left.TotalSeconds <= 0) {
+        string lbl = timerLabel; timerEnd = null;
+        System.Media.SystemSounds.Asterisk.Play();
+        ShowPeek(null, "", "#FFFFFF", "#FF9F0A", "Minuteur", lbl + " terminé", lbl == "Focus" ? "Prends une pause de 5 min" : "On reprend ?", 6000, false);
+        UpdateTimer(); return;
+      }
+      string txt = string.Format("{0:00}:{1:00}", (int)Math.Floor(left.TotalMinutes), left.Seconds);
+      double frac = left.TotalSeconds / timerTotal;
+      E<TextBlock>("CTimer").Text = txt; E<TextBlock>("TRingTxt").Text = txt;
+      E<Path>("TRing").Data = Fx.Arc(64, 5, frac);
+      E<TextBlock>("TLabel").Text = timerLabel; E<TextBlock>("TSub").Text = "Fin à " + timerEnd.Value.ToString("HH:mm");
+      E<TextBlock>("RingTxt").Text = ((int)Math.Ceiling(left.TotalMinutes)).ToString();
+      E<Path>("Ring").Data = Fx.Arc(22, 2.5, frac);
+      Vis("BTStop", true); Vis("BT25", false); Vis("BT5", false);
+    }
+
+    // ---------------- Nox ----------------
+    void UpdateNox() {
+      Hashtable n = G(sync, "nox") as Hashtable;
+      string state, text, act = "";
+      if (n == null) { state = "off"; text = "connexion…"; }
+      else if (!Bool(G(n, "ok"))) { state = Str(G(n, "state")) == "nourl" ? "off" : "down"; text = Str(G(n, "error")); }
+      else {
+        state = Bool(G(n, "busy")) ? "busy" : "online";
+        text = Bool(G(n, "busy")) ? "au travail" : "en ligne";
+        act = Str(G(n, "activity"));
+      }
+      noxState = state;
+      Color dot = state == "online" ? Rgb("#30D158") : state == "busy" ? accentDefault : state == "down" ? Rgb("#FF453A") : Rgb("#8E8E93");
+      Color glow = state == "online" ? Rgb("#9BF0B0") : state == "down" ? Rgb("#FF8A80") : Rgb("#B9B4FF");
+      E<Ellipse>("NDot").Fill = Br(dot);
+      E<TextBlock>("NState").Text = text;
+      E<TextBlock>("NAct").Text = act;
+      Vis("NAct", act.Length > 0);
+      if (eyeGlow.Color != glow) { AnimColor(eyeGlow, DropShadowEffect.ColorProperty, glow, 500); AnimColor(eyeGlow2, DropShadowEffect.ColorProperty, glow, 500); }
+      if (n == null || !Bool(G(n, "ok"))) { Vis("NConfirm", false); return; }
+      Hashtable wd = G(n, "widget") as Hashtable;
+      if (wd != null) {
+        Hashtable me = G(wd, "meteo") as Hashtable;
+        E<TextBlock>("TMeteo").Text = me == null ? "" : Str(G(me, "temp")) + "°  " + Str(G(me, "libelle")) + "  ·  " + Str(G(me, "min")) + "° / " + Str(G(me, "max")) + "°";
+        Vis("TMeteo", me != null);
+        IEnumerable ag = G(wd, "agenda") as IEnumerable;
+        List<string> items = new List<string>();
+        if (ag != null && !(ag is string)) foreach (object o in ag) if (o != null && items.Count < 2) items.Add(o.ToString());
+        E<TextBlock>("TAgenda1").Text = items.Count > 0 ? items[0] : "";
+        E<TextBlock>("TAgenda2").Text = items.Count > 1 ? items[1] : "";
+        Vis("TAgenda1", items.Count > 0); Vis("TAgenda2", items.Count > 1);
+      }
+
+      // dernier message de Nox
+      Hashtable msg = G(n, "last") as Hashtable;
+      if (msg != null) {
+        string id = Str(G(msg, "id")), txt = Str(G(msg, "texte"));
+        E<TextBlock>("NLast").Text = txt;
+        E<TextBlock>("NLastTime").Text = Str(G(msg, "heure"));
+        Vis("NLastBox", txt.Length > 0);
+        if (id != noxMsgId) {
+          bool first = !noxSeen;
+          noxMsgId = id;
+          if (!first && !(expandedOn && page == "PgNox")) {
+            string flat = txt.Replace("\r", " ").Replace("\n", " ").Replace("**", "");
+            string t1 = flat.Length > 60 ? flat.Substring(0, 60).TrimEnd() + "…" : flat;
+            string t2 = flat.Length > 60 ? (flat.Length > 140 ? flat.Substring(60, 80).Trim() + "…" : flat.Substring(60).Trim()) : "";
+            ShowPeek(null, "", "#FFFFFF", "#5E5CE6", "Nox", t1, t2, 6000, false);
+          }
+        }
+      }
+      noxSeen = true;
+      // feu vert en attente : on peut répondre depuis la pilule
+      Hashtable conf = G(n, "confirm") as Hashtable;
+      Vis("NConfirm", conf != null);
+      if (conf != null) {
+        string desc = Str(G(conf, "description"));
+        E<TextBlock>("NConfText").Text = desc;
+        string jt = Str(G(conf, "jeton"));
+        if (Str(G(sync, "confShown")) != jt) {
+          sync["confShown"] = jt;
+          ShowPeek(null, "", "#FFFFFF", "#FF9F0A", "Nox · feu vert", desc, null, 15000, true);
+        }
+      }
+      Vis("NBusy", Bool(G(n, "occupe")));
+    }
+    void SendNox() {
+      TextBox input = E<TextBox>("NInput");
+      string t = input.Text.Trim();
+      if (t.Length == 0) return;
+      NoxCmd("send:" + t);
+      input.Text = "";
+      E<TextBlock>("NLast").Text = "Envoyé : " + t;
+      Vis("NLastBox", true);
+      StopTyping();
+    }
+    void Confirm(bool yes) {
+      Hashtable n = G(sync, "nox") as Hashtable;
+      Hashtable conf = n == null ? null : G(n, "confirm") as Hashtable;
+      if (conf == null) return;
+      NoxCmd("confirm:" + (yes ? "1" : "0") + ":" + Str(G(conf, "jeton")));
+      Vis("NConfirm", false);
     }
   }
 }
+
 '@
 
+try {
+  Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Net.Http
+  Add-Type -AssemblyName System.Runtime.WindowsRuntime
+  $refs = @(
+    'System.dll',
+    [System.Windows.Window].Assembly.Location,
+    [System.Windows.Media.Color].Assembly.Location,
+    [System.Windows.DependencyObject].Assembly.Location,
+    [System.Xaml.XamlReader].Assembly.Location,
+    [System.Management.Automation.PSObject].Assembly.Location
+  )
+  Add-Type -ReferencedAssemblies $refs -TypeDefinition $CSharp -IgnoreWarnings -ErrorAction Stop
+} catch { Fail 'compilation' ((@($Error | Select-Object -First 8 | ForEach-Object { $_.ToString() }) -join ' | ')) }
+Log 'code compilé'
+
 # ============================================================
-#  Fil de fond : musique (Windows) + Nox  -> table partagée
+#  Table partagée entre les fils
 # ============================================================
 $sync = [hashtable]::Synchronized(@{
-  stop = $false; media = $null; playing = $false; timeline = $null; nox = $null
-  cmds = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
-  logPath = $LogPath; accent = $DefaultAccent
-  dir = $Here; version = $Version; updateRepo = $UpdateRepo; updated = $null
+  stop = $false; media = $null; playing = $false; timeline = $null; nox = $null; noxUrl = $null
+  cmds = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+  noxcmds = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+  logPath = $LogPath; accent = $DefaultAccent; dir = $Here; version = $Version
+  updateRepo = $UpdateRepo; updated = $null; skipPath = $SkipPath; restart = $false
 })
 
-$bgScript = {
-  param($sync, $noxUrl, $noxToken)
-  function BLog($m) { try { Add-Content -Path $sync.logPath -Value ("{0:HH:mm:ss} BG  {1}" -f (Get-Date), $m) -Encoding UTF8 } catch {} }
+# ============================================================
+#  Fil 1 : musique (Windows) + mises à jour
+# ============================================================
+$mediaScript = {
+  param($sync)
+  function BLog($m) { try { Add-Content -Path $sync.logPath -Value ("{0:HH:mm:ss} MUS {1}" -f (Get-Date), $m) -Encoding UTF8 } catch {} }
   $lastErr = ''
   try {
     Add-Type -AssemblyName System.Runtime.WindowsRuntime, PresentationCore, WindowsBase, System.Net.Http
@@ -308,19 +1105,16 @@ $bgScript = {
     }
     $null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]
     $null = [Windows.Storage.Streams.IRandomAccessStreamWithContentType,Windows.Storage.Streams,ContentType=WindowsRuntime]
-    $null = [Windows.Storage.Streams.DataReader,Windows.Storage.Streams,ContentType=WindowsRuntime]
-    $tMgr   = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]
-    $tProps = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties,Windows.Media.Control,ContentType=WindowsRuntime]
+    $tMgr    = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]
+    $tProps  = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties,Windows.Media.Control,ContentType=WindowsRuntime]
     $tStream = [Windows.Storage.Streams.IRandomAccessStreamWithContentType]
     $mgr = Await ($tMgr::RequestAsync()) $tMgr
-    if ($mgr) { BLog 'musique : connecté au gestionnaire média Windows' } else { BLog 'musique : gestionnaire média introuvable' }
-  } catch { BLog ("musique (init) : " + $_.Exception.Message); $mgr = $null }
+    if ($mgr) { BLog 'connecté au gestionnaire média Windows' } else { BLog 'gestionnaire média introuvable' }
+  } catch { BLog ("init : " + $_.Exception.Message); $mgr = $null }
 
   $http = New-Object System.Net.Http.HttpClient
-  $http.Timeout = [TimeSpan]::FromSeconds(8)
+  $http.Timeout = [TimeSpan]::FromSeconds(10)
   $http.DefaultRequestHeaders.UserAgent.ParseAdd('MathisDynamicIsland/1.0')
-  if ($noxToken) { $http.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $noxToken) }
-  $noxNext = [DateTime]::MinValue
   $updNext = [DateTime]::Now.AddSeconds(15)
   $trackKey = ''
   $fallback = [System.Windows.Media.ColorConverter]::ConvertFromString($sync.accent)
@@ -328,7 +1122,6 @@ $bgScript = {
   while (-not $sync.stop) {
     try {
       if ($mgr) {
-        # session : celle qui joue en priorité
         $sess = $null
         foreach ($x in $mgr.GetSessions()) {
           if ($x.GetPlaybackInfo().PlaybackStatus.ToString() -eq 'Playing') { $sess = $x; break }
@@ -337,18 +1130,29 @@ $bgScript = {
 
         $c = $null
         while ($sync.cmds.TryDequeue([ref]$c)) {
-          if ($sess) {
-            switch ($c) {
-              'play' { $null = $sess.TryTogglePlayPauseAsync() }
-              'next' { $null = $sess.TrySkipNextAsync() }
-              'prev' { $null = $sess.TrySkipPreviousAsync() }
-              default {
-                if ($c -like 'seek:*') {
-                  $sec = [double]($c.Substring(5)) / 1000
-                  $tl0 = $sess.GetTimelineProperties()
-                  $null = $sess.TryChangePlaybackPositionAsync([long](($tl0.StartTime.TotalSeconds + $sec) * 10000000))
-                }
-              }
+          if (-not $sess) { continue }
+          if ($c -eq 'play') { $null = $sess.TryTogglePlayPauseAsync() }
+          elseif ($c -eq 'next') { $null = $sess.TrySkipNextAsync() }
+          elseif ($c -eq 'prev') { $null = $sess.TrySkipPreviousAsync() }
+          elseif ($c -like 'seek*:*') {
+            $ms = [long]($c.Substring($c.IndexOf(':') + 1))
+            $done = $false
+            if ($c -like 'seekspotify:*' -and $sync.noxUrl) {
+              # Spotify gère mal la commande Windows : on passe par Nox (API Spotify)
+              try {
+                $body = New-Object System.Net.Http.StringContent ('{"action":"position","valeur":' + $ms + ',"leger":true}'), ([System.Text.Encoding]::UTF8), 'application/json'
+                $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post), ($sync.noxUrl + '/api/musique')
+                $req.Content = $body; $req.Headers.Add('X-Jarvis', '1')
+                $r = $http.SendAsync($req)
+                if ($r.Wait(6000) -and $r.Result.IsSuccessStatusCode) { $done = $true; BLog "position $([int]($ms/1000)) s via Nox" }
+                else { BLog "position via Nox refusée ($(if ($r.IsCompleted) { [int]$r.Result.StatusCode } else { 'délai' }))" }
+              } catch { BLog ("position via Nox : " + $_.Exception.Message) }
+            }
+            if (-not $done) {
+              $tl0 = $sess.GetTimelineProperties()
+              $ticks = [long]($tl0.StartTime.Ticks + $ms * 10000)
+              $ok = Await ($sess.TryChangePlaybackPositionAsync($ticks)) ([bool])
+              BLog "position $([int]($ms/1000)) s via Windows : $ok"
             }
           }
         }
@@ -367,9 +1171,9 @@ $bgScript = {
                   $ras = Await ($p.Thumbnail.OpenReadAsync()) $tStream
                   if ($ras) {
                     $bytes = [Island.Img]::ReadAll($ras)
-                    $ms = New-Object System.IO.MemoryStream (,$bytes)
-                    $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
-                    $bmp.BeginInit(); $bmp.CacheOption = 'OnLoad'; $bmp.DecodePixelWidth = 160; $bmp.StreamSource = $ms; $bmp.EndInit(); $bmp.Freeze()
+                    $ms2 = New-Object System.IO.MemoryStream (,$bytes)
+                    $bmp = [System.Windows.Media.Imaging.BitmapImage]::new()
+                    $bmp.BeginInit(); $bmp.CacheOption = 'OnLoad'; $bmp.DecodePixelWidth = 160; $bmp.StreamSource = $ms2; $bmp.EndInit(); $bmp.Freeze()
                     $art = $bmp
                     $col = [Island.Fx]::Dominant($bmp, $fallback)
                   }
@@ -382,7 +1186,6 @@ $bgScript = {
             $pos = ($tl.Position - $tl.StartTime).TotalSeconds
             if ($playing -and $tl.LastUpdatedTime.Year -gt 2000) { $pos += [math]::Min(([DateTimeOffset]::Now - $tl.LastUpdatedTime).TotalSeconds, $end) }
             $sync.timeline = @{ pos = $pos; end = $end; at = [DateTime]::Now }
-            $sync.playing = $playing
           } else { $sync.media = $null; $sync.playing = $false; $trackKey = '' }
         } else { $sync.media = $null; $sync.playing = $false; $trackKey = '' }
       }
@@ -391,20 +1194,8 @@ $bgScript = {
       if ($m -ne $lastErr) { BLog $m; $lastErr = $m }
     }
 
-    if ($noxUrl -and [DateTime]::Now -ge $noxNext) {
-      $noxNext = [DateTime]::Now.AddSeconds(20)
-      try {
-        $r = $http.GetStringAsync($noxUrl)
-        if ($r.Wait(8000)) { $sync.nox = @{ ok = $true; json = $r.Result } } else { $sync.nox = @{ ok = $false } }
-      } catch { $sync.nox = @{ ok = $false } }
-    }
-    if (-not $sync.wdDone -and $sync.uiStart -and ([DateTime]::Now - $sync.uiStart).TotalSeconds -gt 6) {
-      $sync.wdDone = $true
-      if (-not $sync.uiBeat) { BLog "ALERTE : l'interface ne répond pas (aucun cycle depuis 6 s), dernière étape : $($sync.step)" }
-      else { BLog "interface OK (dernier cycle il y a $([int]([DateTime]::Now - $sync.uiBeat).TotalMilliseconds) ms, étape : $($sync.step))" }
-    }
-    # Mises à jour automatiques depuis GitHub (au démarrage puis toutes les 3 h)
-    if ($sync.updateRepo -and -not $sync.updated -and [DateTime]::Now -ge $updNext) {
+    # Mises à jour automatiques depuis GitHub (15 s après le démarrage puis toutes les 3 h)
+    if (-not $sync.updated -and [DateTime]::Now -ge $updNext) {
       $updNext = [DateTime]::Now.AddHours(3)
       try {
         $ct = $http.GetStringAsync('https://api.github.com/repos/' + $sync.updateRepo + '/commits/main')
@@ -414,7 +1205,8 @@ $bgScript = {
         $vt = $http.GetStringAsync($base + '/version.txt')
         if ($vt.Wait(10000)) {
           $remote = [version]($vt.Result.Trim())
-          if ($remote -gt [version]$sync.version) {
+          $skip = @(); if (Test-Path $sync.skipPath) { $skip = Get-Content $sync.skipPath }
+          if ($remote -gt [version]$sync.version -and ($skip -notcontains $remote.ToString())) {
             $dl = $http.GetByteArrayAsync($base + '/island.ps1')
             if ($dl.Wait(30000)) {
               $txt = [System.Text.Encoding]::UTF8.GetString($dl.Result).TrimStart([char]0xFEFF)
@@ -432,17 +1224,144 @@ $bgScript = {
         }
       } catch { BLog ("mise à jour : " + $_.Exception.Message) }
     }
-    Start-Sleep -Milliseconds 350
+    Start-Sleep -Milliseconds 300
   }
 }
 
-$rs = [runspacefactory]::CreateRunspace()
-$rs.ApartmentState = 'MTA'
-$rs.Open()
-$bg = [PowerShell]::Create()
-$bg.Runspace = $rs
-$null = $bg.AddScript($bgScript).AddArgument($sync).AddArgument($NoxStatusUrl).AddArgument($NoxToken)
-$bgHandle = $bg.BeginInvoke()
+# ============================================================
+#  Fil 2 : Nox (appli de Nox par Tailscale, rien d'ouvert sur Internet)
+# ============================================================
+$noxScript = {
+  param($sync, $fixedUrl)
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+  function NLog($m) { try { Add-Content -Path $sync.logPath -Value ("{0:HH:mm:ss} NOX {1}" -f (Get-Date), $m) -Encoding UTF8 } catch {} }
+  Add-Type -AssemblyName System.Net.Http
+  $http = New-Object System.Net.Http.HttpClient
+  $http.Timeout = [TimeSpan]::FromSeconds(40)
+  $http.DefaultRequestHeaders.UserAgent.ParseAdd('MathisDynamicIsland/1.0')
+  $http.DefaultRequestHeaders.Add('X-Jarvis', '1')
+
+  function Find-Url {
+    if ($fixedUrl) { return $fixedUrl.TrimEnd('/') }
+    $ts = @("$env:ProgramFiles\Tailscale\tailscale.exe", "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $ts) { $cmd = Get-Command tailscale -ErrorAction SilentlyContinue; if ($cmd) { $ts = $cmd.Source } }
+    if (-not $ts) { return $null }
+    $j = (& $ts status --json 2>$null | Out-String) | ConvertFrom-Json
+    if (-not $j -or -not $j.Peer) { return $null }
+    $peers = @($j.Peer.PSObject.Properties | ForEach-Object { $_.Value })
+    $p = $peers | Where-Object { $_.HostName -match '^jarvis' -or $_.DNSName -match '^jarvis\.' } | Select-Object -First 1
+    if (-not $p) { return $null }
+    return 'https://' + $p.DNSName.TrimEnd('.')
+  }
+  function Get-Json($path, [int]$wait = 12000) {
+    $t = $http.GetStringAsync($sync.noxUrl + $path)
+    if (-not $t.Wait($wait)) { throw "délai dépassé ($path)" }
+    return ($t.Result | ConvertFrom-Json)
+  }
+  function Post-Json($path, $obj) {
+    $json = $obj | ConvertTo-Json -Compress
+    $c = New-Object System.Net.Http.StringContent $json, ([System.Text.Encoding]::UTF8), 'application/json'
+    return $http.PostAsync($sync.noxUrl + $path, $c)
+  }
+
+  $state = @{ ok = $false; state = 'nourl'; error = 'recherche de Nox…' }
+  $sync.nox = $state.Clone()
+  $nextFind = [DateTime]::MinValue; $nextEquipe = [DateTime]::MinValue; $nextWidget = [DateTime]::MinValue
+  $pouls = $null; $f = ''; $needConv = $true; $lastErr = ''; $pending = @()
+
+  while (-not $sync.stop) {
+    try {
+      if (-not $sync.noxUrl) {
+        if ([DateTime]::Now -ge $nextFind) {
+          $nextFind = [DateTime]::Now.AddSeconds(60)
+          $u = Find-Url
+          if ($u) { $sync.noxUrl = $u; NLog "Nox trouvé : $u"; $needConv = $true }
+          else { $sync.nox = @{ ok = $false; state = 'nourl'; error = 'Tailscale ou Nox introuvable' } }
+        }
+        Start-Sleep -Milliseconds 1000; continue
+      }
+
+      # ordres venus de la pilule
+      $c = $null
+      while ($sync.noxcmds.TryDequeue([ref]$c)) {
+        if ($c -like 'send:*') { $pending += Post-Json '/api/conversation' @{ texte = $c.Substring(5) }; NLog 'message envoyé à Nox' }
+        elseif ($c -like 'confirm:*') {
+          $parts = $c.Split(':', 3)
+          $pending += Post-Json '/api/conversation/confirmer' @{ jeton = $parts[2]; oui = ($parts[1] -eq '1') }
+          NLog ("feu vert : " + $(if ($parts[1] -eq '1') { 'confirmé' } else { 'annulé' }))
+        }
+      }
+      $pending = @($pending | Where-Object { -not $_.IsCompleted })
+
+      # qui travaille en ce moment
+      if ([DateTime]::Now -ge $nextEquipe) {
+        $nextEquipe = [DateTime]::Now.AddSeconds(8)
+        $e = Get-Json '/api/equipe'
+        $actifs = @($e.maintenant | Where-Object { $_.en_tache })
+        $state.busy = $actifs.Count -gt 0
+        $state.activity = if ($actifs.Count -gt 0) { (@($actifs | ForEach-Object { "$($_.nom) · $($_.activite)" }) -join '   ') } else { 'Rien en cours' }
+        $state.ok = $true; $state.state = 'ok'; $state.error = ''
+      }
+      # météo et agenda pour la page Aujourd'hui
+      if ([DateTime]::Now -ge $nextWidget) {
+        $nextWidget = [DateTime]::Now.AddMinutes(5)
+        try {
+          $w = Get-Json '/api/widget' 20000
+          $me = $null
+          if ($w.meteo) { $me = @{ temp = [string]$w.meteo.temp; libelle = [string]$w.meteo.libelle; min = [string]$w.meteo.min; max = [string]$w.meteo.max } }
+          $state.widget = @{ meteo = $me; agenda = @($w.agenda_liste | Where-Object { $_ } | ForEach-Object { [string]$_ }) }
+        } catch { NLog ("widget : " + $_.Exception.Message) }
+      }
+      # fil de discussion : le « pouls » revient dès qu'un message arrive
+      if ($pouls -and $pouls.IsCompleted) {
+        if ($pouls.Status -eq 'RanToCompletion') {
+          $pj = $pouls.Result | ConvertFrom-Json
+          if ([string]$pj.f -ne $f) { $f = [string]$pj.f; $needConv = $true }
+          $state.occupe = [bool]$pj.occupe
+        } else { Start-Sleep -Milliseconds 2000 }
+        $pouls = $null
+      }
+      if ($needConv) {
+        $needConv = $false
+        $conv = Get-Json '/api/conversation'
+        $msgs = @($conv.messages)
+        $state.occupe = [bool]$conv.occupe
+        $lastNox = $msgs | Where-Object { $_.role -ne 'moi' } | Select-Object -Last 1
+        if ($lastNox) { $state.last = @{ id = [string]$lastNox.id; texte = [string]$lastNox.texte; heure = [string]$lastNox.heure } }
+        $att = $msgs | Where-Object { $_.confirmation -and $_.confirmation.etat -eq 'attente' } | Select-Object -Last 1
+        $state.confirm = if ($att) { @{ jeton = [string]$att.confirmation.jeton; description = [string]$att.confirmation.description } } else { $null }
+      }
+      if (-not $pouls) { $pouls = $http.GetStringAsync($sync.noxUrl + '/api/pouls?f=' + [uri]::EscapeDataString($f)) }
+      $sync.nox = $state.Clone()
+      $lastErr = ''
+    } catch {
+      $m = $_.Exception.Message; if ($_.Exception.InnerException) { $m += ' / ' + $_.Exception.InnerException.Message }
+      if ($m -ne $lastErr) { NLog $m; $lastErr = $m }
+      $state.ok = $false; $state.state = 'down'; $state.error = 'injoignable'
+      $sync.nox = $state.Clone()
+      $pouls = $null
+      Start-Sleep -Milliseconds 5000
+      if ($m -match 'nom|name|resolve|introuvable') { $sync.noxUrl = $null }
+    }
+    Start-Sleep -Milliseconds 400
+  }
+}
+
+function Start-Worker($sb, $args2) {
+  $rs = [runspacefactory]::CreateRunspace()
+  $rs.ApartmentState = 'MTA'
+  $rs.Open()
+  $ps = [PowerShell]::Create()
+  $ps.Runspace = $rs
+  $null = $ps.AddScript($sb)
+  foreach ($a in $args2) { $null = $ps.AddArgument($a) }
+  $null = $ps.BeginInvoke()
+  return $ps
+}
+$workers = @(
+  (Start-Worker $mediaScript @($sync)),
+  (Start-Worker $noxScript @($sync, $NoxUrl))
+)
 
 # ============================================================
 #  Interface
@@ -452,11 +1371,12 @@ $bgHandle = $bg.BeginInvoke()
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize"
-        Width="720" Height="300" UseLayoutRounding="True">
+        Width="520" Height="320" UseLayoutRounding="True" SnapsToDevicePixels="True">
   <Window.Resources>
     <Style x:Key="IconBtn" TargetType="Button">
       <Setter Property="Foreground" Value="White"/>
       <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Focusable" Value="False"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
@@ -476,17 +1396,35 @@ $bgHandle = $bg.BeginInvoke()
     </Style>
     <Style x:Key="Chip" TargetType="Button">
       <Setter Property="Foreground" Value="White"/>
+      <Setter Property="Background" Value="#1AFFFFFF"/>
       <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Focusable" Value="False"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="b" Background="#1AFFFFFF" CornerRadius="13" Padding="12,5">
+            <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="13" Padding="12,5">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#30FFFFFF"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Background" Value="#45FFFFFF"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.85"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.65"/></Trigger>
             </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="Tab" TargetType="Button">
+      <Setter Property="Foreground" Value="#8E8E93"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Margin" Value="2,0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border Background="{TemplateBinding Background}" CornerRadius="11" Padding="10,4">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
@@ -497,97 +1435,112 @@ $bgHandle = $bg.BeginInvoke()
     </Style>
   </Window.Resources>
 
-  <StackPanel x:Name="Row" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Top">
-    <!-- oreille gauche (raccord arrondi avec le haut de l'écran) -->
-    <Path x:Name="EarL" Width="12" Height="12" VerticalAlignment="Top" Data="M0,0 L12,0 L12,12 A12,12 0 0 0 0,0 Z"/>
+  <Canvas x:Name="Root" Width="520" Height="320" RenderTransformOrigin="0.5,0">
+    <Canvas.RenderTransform><ScaleTransform/></Canvas.RenderTransform>
 
-    <Border x:Name="Pill" VerticalAlignment="Top" Width="170" Height="34" RenderTransformOrigin="0.5,0">
-      <Border.RenderTransform><ScaleTransform x:Name="PillScale"/></Border.RenderTransform>
-      <Grid x:Name="Body">
+    <!-- la forme (dessinée image par image) -->
+    <Path x:Name="Shape"/>
+    <Path x:Name="EarL" Data="M0,0 L12,0 L12,12 A12,12 0 0 0 0,0 Z"><Path.RenderTransform><TranslateTransform/></Path.RenderTransform></Path>
+    <Path x:Name="EarR" Data="M0,0 L12,0 A12,12 0 0 0 0,12 Z"><Path.RenderTransform><TranslateTransform/></Path.RenderTransform></Path>
 
-        <!-- COMPACT -->
-        <DockPanel x:Name="Compact" Height="34" VerticalAlignment="Top" Margin="10,0,12,0">
-          <!-- gauche -->
-          <Border x:Name="CArtBox" DockPanel.Dock="Left" Width="22" Height="22" CornerRadius="6" Background="#1C1C1E" VerticalAlignment="Center">
-            <Border.OpacityMask><VisualBrush><VisualBrush.Visual><Border Width="22" Height="22" CornerRadius="6" Background="Black"/></VisualBrush.Visual></VisualBrush></Border.OpacityMask>
-            <Image x:Name="CArt" Stretch="UniformToFill"/>
-          </Border>
-          <Grid x:Name="CRingBox" DockPanel.Dock="Left" Width="17" Height="17" VerticalAlignment="Center">
+    <!-- bulle : 2e activité (minuteur ou Nox au travail pendant la musique) -->
+    <Border x:Name="Bubble" Canvas.Top="1" Background="#000000" Width="0" Height="0" Visibility="Collapsed">
+      <Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
+      <Grid>
+        <Grid x:Name="BRing" Width="22" Height="22" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <Ellipse Width="22" Height="22" Stroke="#33FF9F0A" StrokeThickness="2.5"/>
+          <Path x:Name="Ring" Width="22" Height="22" Stroke="$TimerColor" StrokeThickness="2.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+          <TextBlock x:Name="RingTxt" FontSize="9" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" Foreground="$TimerColor" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Grid>
+        <Grid x:Name="BEyes" Width="18" Height="10" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed">
+          <Ellipse x:Name="BEyeL" Width="5" Height="9" Fill="#F5F5FA" HorizontalAlignment="Left" Margin="2,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+          <Ellipse x:Name="BEyeR" Width="5" Height="9" Fill="#F5F5FA" HorizontalAlignment="Right" Margin="0,0,2,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+        </Grid>
+      </Grid>
+    </Border>
+
+    <!-- le contenu, découpé à la forme de la pilule -->
+    <Canvas x:Name="ClipHost" Width="520" Height="320">
+
+      <!-- COMPACT -->
+      <Grid x:Name="Compact" Height="34">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" Margin="10,0,0,0" VerticalAlignment="Center">
+          <Border x:Name="CArtBox" Width="22" Height="22" CornerRadius="6" Background="#1C1C1E"/>
+          <Grid x:Name="CRingBox" Width="17" Height="17" Margin="2,0,0,0">
             <Ellipse Width="17" Height="17" Stroke="#30FFFFFF" StrokeThickness="2.5"/>
             <Path x:Name="CRing" Width="17" Height="17" StrokeThickness="2.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
           </Grid>
-          <!-- droite -->
-          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-            <StackPanel x:Name="CEq" Orientation="Horizontal" Height="14" VerticalAlignment="Center" Margin="10,0,0,0">
-              <Rectangle x:Name="Eq1" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.35"/></Rectangle.RenderTransform></Rectangle>
-              <Rectangle x:Name="Eq2" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
-              <Rectangle x:Name="Eq3" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
-              <Rectangle x:Name="Eq4" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
-            </StackPanel>
-            <Grid x:Name="CEyes" Width="24" Height="12" Margin="12,0,0,0" VerticalAlignment="Center">
-              <Grid.RenderTransform><TranslateTransform x:Name="CEyesShift"/></Grid.RenderTransform>
-              <Ellipse x:Name="EyeL" Width="6" Height="11" HorizontalAlignment="Left" Margin="4,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
-              <Ellipse x:Name="EyeR" Width="6" Height="11" HorizontalAlignment="Right" Margin="0,0,4,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
-            </Grid>
+        </Grid>
+        <Grid Grid.Column="1" VerticalAlignment="Center" Margin="9,0,9,0">
+          <TextBlock x:Name="CClock" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" HorizontalAlignment="Center"/>
+          <TextBlock x:Name="CTimer" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" Foreground="$TimerColor" HorizontalAlignment="Center"/>
+          <Canvas x:Name="CTitleBox" Height="18" Width="10" ClipToBounds="True" HorizontalAlignment="Left">
+            <TextBlock x:Name="CTitle" FontSize="12.5" Foreground="#F2F2F7">
+              <TextBlock.RenderTransform><TranslateTransform/></TextBlock.RenderTransform>
+            </TextBlock>
+          </Canvas>
+        </Grid>
+        <Grid Grid.Column="2" Margin="0,0,12,0" VerticalAlignment="Center">
+          <StackPanel x:Name="CEq" Orientation="Horizontal" Height="14" VerticalAlignment="Center">
+            <Rectangle x:Name="Eq1" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.35"/></Rectangle.RenderTransform></Rectangle>
+            <Rectangle x:Name="Eq2" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
+            <Rectangle x:Name="Eq3" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
+            <Rectangle x:Name="Eq4" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
           </StackPanel>
-          <!-- centre -->
-          <Grid VerticalAlignment="Center" Margin="9,0,0,0">
-            <TextBlock x:Name="CClock" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" HorizontalAlignment="Center"/>
-            <TextBlock x:Name="CTimer" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" Foreground="$TimerColor" HorizontalAlignment="Center"/>
-            <Canvas x:Name="CTitleBox" Height="18" Width="150" ClipToBounds="True" HorizontalAlignment="Left">
-              <TextBlock x:Name="CTitle" FontSize="12.5" Foreground="#F2F2F7" Canvas.Top="0">
-                <TextBlock.RenderTransform><TranslateTransform x:Name="CTitleShift"/></TextBlock.RenderTransform>
-              </TextBlock>
-            </Canvas>
+          <Grid x:Name="CEyes" Width="24" Height="12" VerticalAlignment="Center">
+            <Grid.RenderTransform><TranslateTransform/></Grid.RenderTransform>
+            <Ellipse x:Name="EyeL" Width="6" Height="11" Fill="#F5F5FA" HorizontalAlignment="Left" Margin="4,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+            <Ellipse x:Name="EyeR" Width="6" Height="11" Fill="#F5F5FA" HorizontalAlignment="Right" Margin="0,0,4,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
           </Grid>
-        </DockPanel>
+        </Grid>
+      </Grid>
 
-        <!-- TOAST (volume, charge...) -->
-        <DockPanel x:Name="Toast" Height="34" VerticalAlignment="Top" Margin="14,0,16,0" Opacity="0" IsHitTestVisible="False">
-          <TextBlock x:Name="TIco" DockPanel.Dock="Left" FontFamily="Segoe Fluent Icons" FontSize="16" VerticalAlignment="Center" Width="22"/>
-          <TextBlock x:Name="TRight" DockPanel.Dock="Right" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="13" VerticalAlignment="Center" Margin="12,0,0,0" MinWidth="26" TextAlignment="Right"/>
-          <Grid VerticalAlignment="Center" Margin="10,0,0,0">
-            <TextBlock x:Name="TText" FontSize="13" TextTrimming="CharacterEllipsis"/>
-            <Border x:Name="TBarBg" Height="6" CornerRadius="3" Background="#33FFFFFF" Width="170" HorizontalAlignment="Left">
-              <Border x:Name="TBar" Height="6" CornerRadius="3" Background="White" HorizontalAlignment="Left" Width="0"/>
-            </Border>
-          </Grid>
-        </DockPanel>
-
-        <!-- PEEK (notification façon iOS) -->
-        <Grid x:Name="Peek" VerticalAlignment="Top" Width="360" Margin="16,10,16,14" HorizontalAlignment="Left" Opacity="0" IsHitTestVisible="False">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-          <Border x:Name="PArtBox" Width="40" Height="40" CornerRadius="10" Background="#2C2C2E" VerticalAlignment="Center">
-            <Border.OpacityMask><VisualBrush><VisualBrush.Visual><Border Width="40" Height="40" CornerRadius="10" Background="Black"/></VisualBrush.Visual></VisualBrush></Border.OpacityMask>
-            <Grid>
-              <TextBlock x:Name="PIco" FontFamily="Segoe Fluent Icons" FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-              <Image x:Name="PArt" Stretch="UniformToFill"/>
-            </Grid>
+      <!-- TOAST (volume, charge) -->
+      <DockPanel x:Name="Toast" Height="34" Width="300">
+        <TextBlock x:Name="TIco" DockPanel.Dock="Left" FontFamily="Segoe Fluent Icons" FontSize="16" VerticalAlignment="Center" Width="22" Margin="14,0,0,0"/>
+        <TextBlock x:Name="TRight" DockPanel.Dock="Right" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="13" VerticalAlignment="Center" Margin="12,0,16,0" MinWidth="26" TextAlignment="Right"/>
+        <Grid VerticalAlignment="Center" Margin="10,0,0,0">
+          <TextBlock x:Name="TText" FontSize="13" TextTrimming="CharacterEllipsis"/>
+          <Border x:Name="TBarBg" Height="6" CornerRadius="3" Background="#33FFFFFF" Width="170" HorizontalAlignment="Left">
+            <Border x:Name="TBar" Height="6" CornerRadius="3" Background="White" HorizontalAlignment="Left" Width="0"/>
           </Border>
-          <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+        </Grid>
+      </DockPanel>
+
+      <!-- NOTIFICATION façon iOS -->
+      <Border x:Name="Peek" Padding="16,10,16,14">
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <Border x:Name="PArtBox" Width="40" Height="40" CornerRadius="10" Background="#2C2C2E" VerticalAlignment="Top" Margin="0,2,0,0">
+            <TextBlock x:Name="PIco" FontFamily="Segoe Fluent Icons" FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" Width="300">
             <DockPanel>
               <TextBlock DockPanel.Dock="Right" Text="maintenant" FontSize="11.5" Foreground="#8E8E93"/>
               <TextBlock x:Name="PApp" FontSize="11.5" Foreground="#8E8E93"/>
             </DockPanel>
             <TextBlock x:Name="PTitle" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14.5" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
             <TextBlock x:Name="PSub" FontSize="12.5" Foreground="#AEAEB2" TextTrimming="CharacterEllipsis"/>
+            <StackPanel x:Name="PButtons" Orientation="Horizontal" Margin="0,8,0,0" Visibility="Collapsed">
+              <Button x:Name="BPeekOk" Style="{StaticResource Chip}" Background="#30D158" Margin="0,0,6,0"><TextBlock Text="Confirmer" FontSize="12"/></Button>
+              <Button x:Name="BPeekNo" Style="{StaticResource Chip}"><TextBlock Text="Annuler" FontSize="12"/></Button>
+            </StackPanel>
           </StackPanel>
         </Grid>
+      </Border>
 
-        <!-- ETENDU (survol) : pages qu'on fait défiler à la molette -->
-        <StackPanel x:Name="Expanded" VerticalAlignment="Top" Width="400" Margin="20,12,20,10" HorizontalAlignment="Left" Opacity="0" IsHitTestVisible="False">
-          <Grid x:Name="Pages">
+      <!-- VUE OUVERTE : 4 widgets -->
+      <Border x:Name="Expanded" Width="440" Padding="20,12,20,10">
+        <StackPanel>
+          <Grid>
 
-            <!-- Page Musique -->
+            <!-- Musique -->
             <StackPanel x:Name="PgMusic">
               <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <Border Width="58" Height="58" CornerRadius="13" Background="#1C1C1E">
-                  <Border.OpacityMask><VisualBrush><VisualBrush.Visual><Border Width="58" Height="58" CornerRadius="13" Background="Black"/></VisualBrush.Visual></VisualBrush></Border.OpacityMask>
-                  <Grid>
-                    <TextBlock Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="22" Foreground="#636366" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    <Image x:Name="EArt" Stretch="UniformToFill"/>
-                  </Grid>
+                <Border x:Name="EArtBox" Width="56" Height="56" CornerRadius="13" Background="#1C1C1E">
+                  <TextBlock x:Name="EArtIco" Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="22" Foreground="#636366" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Border>
                 <StackPanel Grid.Column="1" Margin="13,0,8,0" VerticalAlignment="Center">
                   <TextBlock x:Name="ETitle" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="16" TextTrimming="CharacterEllipsis"/>
@@ -601,10 +1554,10 @@ $bgHandle = $bg.BeginInvoke()
                   <Rectangle x:Name="Eq8" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.3"/></Rectangle.RenderTransform></Rectangle>
                 </StackPanel>
               </Grid>
-              <DockPanel x:Name="EProg" Margin="0,12,0,0">
+              <DockPanel x:Name="EProg" Margin="0,10,0,0">
                 <TextBlock x:Name="EPos" DockPanel.Dock="Left" FontSize="11" Foreground="#AEAEB2" Width="36" VerticalAlignment="Center"/>
                 <TextBlock x:Name="ELeft" DockPanel.Dock="Right" FontSize="11" Foreground="#AEAEB2" Width="40" TextAlignment="Right" VerticalAlignment="Center"/>
-                <Grid x:Name="EBarHit" VerticalAlignment="Center" Height="14" Background="#00000000" Cursor="Hand">
+                <Grid x:Name="EBarHit" VerticalAlignment="Center" Height="16" Background="#00000000" Cursor="Hand">
                   <Border CornerRadius="2" Height="4" Background="#30FFFFFF"/>
                   <Border x:Name="EBar" CornerRadius="2" Height="4" RenderTransformOrigin="0,0.5">
                     <Border.RenderTransform><ScaleTransform x:Name="EBarScale" ScaleX="0"/></Border.RenderTransform>
@@ -618,7 +1571,7 @@ $bgHandle = $bg.BeginInvoke()
               </StackPanel>
             </StackPanel>
 
-            <!-- Page Minuteur -->
+            <!-- Minuteur -->
             <Grid x:Name="PgTimer" Visibility="Collapsed">
               <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <Grid Width="64" Height="64">
@@ -637,32 +1590,62 @@ $bgHandle = $bg.BeginInvoke()
               </StackPanel>
             </Grid>
 
-            <!-- Page Nox -->
-            <Grid x:Name="PgNox" Visibility="Collapsed">
-              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-              <Border Width="64" Height="64" CornerRadius="16" Background="#0E0E14">
-                <Grid x:Name="NEyes" Width="34" Height="20">
-                  <Ellipse x:Name="NEyeL" Width="10" Height="19" HorizontalAlignment="Left" Margin="5,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
-                  <Ellipse x:Name="NEyeR" Width="10" Height="19" HorizontalAlignment="Right" Margin="0,0,5,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
-                </Grid>
-              </Border>
-              <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
-                <StackPanel Orientation="Horizontal">
-                  <TextBlock Text="Nox" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="16"/>
-                  <Ellipse x:Name="NDot" Width="8" Height="8" Margin="8,2,0,0" VerticalAlignment="Center"/>
-                  <TextBlock x:Name="NState" FontSize="12.5" Foreground="#AEAEB2" Margin="6,2,0,0" VerticalAlignment="Center"/>
+            <!-- Nox -->
+            <StackPanel x:Name="PgNox" Visibility="Collapsed">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Border Width="48" Height="48" CornerRadius="14" Background="#0E0E16">
+                  <Grid x:Name="NEyes" Width="30" Height="18">
+                    <Grid.RenderTransform><TranslateTransform/></Grid.RenderTransform>
+                    <Ellipse x:Name="NEyeL" Width="9" Height="17" Fill="#F5F5FA" HorizontalAlignment="Left" Margin="4,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+                    <Ellipse x:Name="NEyeR" Width="9" Height="17" Fill="#F5F5FA" HorizontalAlignment="Right" Margin="0,0,4,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+                  </Grid>
+                </Border>
+                <StackPanel Grid.Column="1" Margin="14,0,0,0" VerticalAlignment="Center">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Nox" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="16"/>
+                    <Ellipse x:Name="NDot" Width="8" Height="8" Margin="9,3,0,0" VerticalAlignment="Center" Fill="#8E8E93"/>
+                    <TextBlock x:Name="NState" FontSize="12.5" Foreground="#AEAEB2" Margin="6,3,0,0" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="NBusy" Text="  · écrit…" FontSize="12.5" Foreground="#B9B4FF" Margin="0,3,0,0" VerticalAlignment="Center" Visibility="Collapsed"/>
+                  </StackPanel>
+                  <TextBlock x:Name="NAct" FontSize="12.5" Foreground="#C7C7CC" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
                 </StackPanel>
-                <TextBlock x:Name="NTask" FontSize="13" Foreground="#E5E5EA" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"/>
-                <TextBlock x:Name="NLast" FontSize="12" Foreground="#8E8E93" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
-              </StackPanel>
-            </Grid>
+              </Grid>
+              <Border x:Name="NLastBox" Margin="0,10,0,0" Background="#14FFFFFF" CornerRadius="12" Padding="12,7" Visibility="Collapsed">
+                <StackPanel>
+                  <TextBlock x:Name="NLastTime" FontSize="10.5" Foreground="#8E8E93"/>
+                  <TextBlock x:Name="NLast" FontSize="12.5" Foreground="#E5E5EA" TextWrapping="Wrap" MaxHeight="50" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+              </Border>
+              <Border x:Name="NConfirm" Margin="0,8,0,0" Background="#26FF9F0A" CornerRadius="12" Padding="12,8" Visibility="Collapsed">
+                <DockPanel>
+                  <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0,0,0">
+                    <Button x:Name="BConfNo" Style="{StaticResource Chip}" Margin="0,0,6,0"><TextBlock Text="Annuler" FontSize="12"/></Button>
+                    <Button x:Name="BConfOk" Style="{StaticResource Chip}" Background="#30D158"><TextBlock Text="Confirmer" FontSize="12"/></Button>
+                  </StackPanel>
+                  <TextBlock x:Name="NConfText" FontSize="12.5" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                </DockPanel>
+              </Border>
+              <Border Margin="0,10,0,0" CornerRadius="17" Background="#1FFFFFFF" Height="34" Padding="14,0,3,0">
+                <DockPanel>
+                  <Button x:Name="BSend" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Padding="7"><TextBlock Text="&#xE724;" FontFamily="Segoe Fluent Icons" FontSize="13"/></Button>
+                  <Grid VerticalAlignment="Center">
+                    <TextBlock x:Name="NPh" Text="Demander à Nox…" FontSize="13" Foreground="#8E8E93" IsHitTestVisible="False"/>
+                    <TextBox x:Name="NInput" Background="Transparent" BorderThickness="0" Foreground="White" CaretBrush="White" FontSize="13" Padding="-2,0,0,0" FontFamily="Segoe UI Variable Text, Segoe UI"/>
+                  </Grid>
+                </DockPanel>
+              </Border>
+            </StackPanel>
 
-            <!-- Page Aujourd'hui -->
+            <!-- Aujourd'hui -->
             <Grid x:Name="PgToday" Visibility="Collapsed">
               <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <TextBlock x:Name="EClock" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="40" VerticalAlignment="Center"/>
               <StackPanel Grid.Column="1" Margin="18,0,0,0" VerticalAlignment="Center">
                 <TextBlock x:Name="EDate" FontSize="14.5" Foreground="#E5E5EA"/>
+                <TextBlock x:Name="TMeteo" FontSize="12.5" Foreground="#C7C7CC" Margin="0,3,0,0" Visibility="Collapsed"/>
+                <TextBlock x:Name="TAgenda1" FontSize="12.5" Foreground="#C7C7CC" TextTrimming="CharacterEllipsis" Margin="0,3,0,0" Visibility="Collapsed"/>
+                <TextBlock x:Name="TAgenda2" FontSize="12.5" Foreground="#8E8E93" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
                 <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
                   <TextBlock x:Name="EBattIco" FontFamily="Segoe Fluent Icons" FontSize="15" VerticalAlignment="Center"/>
                   <TextBlock x:Name="EBattTxt" FontSize="12.5" Foreground="#C7C7CC" Margin="6,0,14,0" VerticalAlignment="Center"/>
@@ -673,672 +1656,55 @@ $bgHandle = $bg.BeginInvoke()
             </Grid>
           </Grid>
 
-          <!-- points de pagination -->
-          <StackPanel x:Name="Dots" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0" Height="6"/>
+          <!-- onglets : clic, ou molette / deux doigts -->
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+            <Button x:Name="TabMusic" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Musique" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
+            <Button x:Name="TabTimer" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE916;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Minuteur" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
+            <Button x:Name="TabNox" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE8BD;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Nox" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
+            <Button x:Name="TabToday" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE787;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Aujourd'hui" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
+          </StackPanel>
         </StackPanel>
-
-      </Grid>
-    </Border>
-
-    <!-- oreille droite -->
-    <Path x:Name="EarR" Width="12" Height="12" VerticalAlignment="Top" Data="M0,0 L12,0 A12,12 0 0 0 0,12 Z"/>
-
-    <!-- Bulle (2e activité : minuteur pendant la musique) -->
-    <Border x:Name="Bubble" Background="#000000" VerticalAlignment="Top" Margin="0,2,0,0" Width="0" Height="0" Visibility="Collapsed">
-      <Grid Width="34" Height="34" HorizontalAlignment="Center" VerticalAlignment="Center">
-        <Ellipse Width="24" Height="24" Stroke="#33FF9F0A" StrokeThickness="3"/>
-        <Path x:Name="Ring" Width="24" Height="24" Stroke="$TimerColor" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-        <TextBlock x:Name="RingTxt" FontSize="9.5" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" Foreground="$TimerColor" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-      </Grid>
-    </Border>
-  </StackPanel>
+      </Border>
+    </Canvas>
+  </Canvas>
 </Window>
+
 "@
 
-try { $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml)) }
-catch { Log ("XAML : " + $_.Exception.InnerException.Message + " | " + $_.Exception.Message); exit }
-
-$ui = @{}
-foreach ($n in 'Row','EarL','EarR','Pill','PillScale','Body',
-               'Compact','CArtBox','CArt','CRingBox','CRing','CEq','Eq1','Eq2','Eq3','Eq4','CEyes','CEyesShift','EyeL','EyeR','CClock','CTimer','CTitleBox','CTitle','CTitleShift',
-               'Toast','TIco','TRight','TText','TBarBg','TBar',
-               'Peek','PArtBox','PIco','PArt','PApp','PTitle','PSub',
-               'Expanded','Pages','PgMusic','PgTimer','PgNox','PgToday','Dots',
-               'EArt','ETitle','EArtist','EApp','Eq5','Eq6','Eq7','Eq8','EProg','EPos','ELeft','EBarHit','EBar','EBarScale','BPrev','BPlay','BPlayIco','BNext',
-               'TRing','TRingTxt','TLabel','TSub','BT25','BT5','BTStop',
-               'NEyes','NEyeL','NEyeR','NDot','NState','NTask','NLast',
-               'EClock','EDate','EBattIco','EBattTxt','EVolIco','EVolTxt',
-               'Bubble','Ring','RingTxt') {
-  $ui[$n] = $win.FindName($n)
-  if ($null -eq $ui[$n]) { Log "élément introuvable : $n" }
+try {
+  $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+  $cfg = @{ logPath = [string]$LogPath; accent = $DefaultAccent; timerColor = $TimerColor; chargeColor = $ChargeColor; hideFullscreen = [bool]$HideInFullscreen; version = $Version }
+  $app = New-Object Island.App($win, $sync, $cfg)
+} catch {
+  $sync.stop = $true
+  Fail 'interface' ($_.Exception.ToString())
 }
 
-$fr = [Globalization.CultureInfo]::GetCultureInfo('fr-FR')
-function ToColor($hex) { [System.Windows.Media.ColorConverter]::ConvertFromString($hex) }
-function NewBrush($hex) { New-Object System.Windows.Media.SolidColorBrush (ToColor $hex) }
-
-$PropWidth   = [System.Windows.FrameworkElement]::WidthProperty
-$PropOpacity = [System.Windows.UIElement]::OpacityProperty
-$PropScaleX  = [System.Windows.Media.ScaleTransform]::ScaleXProperty
-$PropScaleY  = [System.Windows.Media.ScaleTransform]::ScaleYProperty
-$PropTransX  = [System.Windows.Media.TranslateTransform]::XProperty
-$PropBlur    = [System.Windows.Media.Effects.BlurEffect]::RadiusProperty
-$PropColor   = [System.Windows.Media.SolidColorBrush]::ColorProperty
-$PropStop    = [System.Windows.Media.GradientStop]::ColorProperty
-$PropFxColor = [System.Windows.Media.Effects.DropShadowEffect]::ColorProperty
-$PropFxOp    = [System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty
-
-# ---------- Pinceaux vivants ----------
-$AccentBrush = NewBrush $DefaultAccent
-$EyeGlowFx = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius = 9; ShadowDepth = 0; Opacity = 0.95; Color = (ToColor '#B9B4FF') }
-$EyeGlowFx2 = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius = 14; ShadowDepth = 0; Opacity = 0.95; Color = (ToColor '#B9B4FF') }
-$ui.CEyes.Effect = $EyeGlowFx
-$ui.NEyes.Effect = $EyeGlowFx2
-foreach ($e in 'EyeL','EyeR','NEyeL','NEyeR') { $ui[$e].Fill = NewBrush '#F5F5FA' }
-
-# fond : noir en haut (collé à l'écran), teinte de la pochette en bas
-$TopStop  = New-Object System.Windows.Media.GradientStop ((ToColor '#000000'), 0.0)
-$MidStop  = New-Object System.Windows.Media.GradientStop ((ToColor '#000000'), 0.45)
-$TintStop = New-Object System.Windows.Media.GradientStop ((ToColor '#000000'), 1.0)
-$PillBg = New-Object System.Windows.Media.LinearGradientBrush
-$PillBg.StartPoint = New-Object System.Windows.Point(0.5, 0)
-$PillBg.EndPoint   = New-Object System.Windows.Point(0.5, 1)
-$PillBg.GradientStops.Add($TopStop); $PillBg.GradientStops.Add($MidStop); $PillBg.GradientStops.Add($TintStop)
-$ui.Pill.Background = $PillBg
-$ui.EarL.Fill = NewBrush '#000000'; $ui.EarR.Fill = NewBrush '#000000'
-$Glow = New-Object System.Windows.Media.Effects.DropShadowEffect
-$Glow.BlurRadius = 24; $Glow.ShadowDepth = 4; $Glow.Direction = 270; $Glow.Opacity = 0.4; $Glow.Color = ToColor '#000000'
-$ui.Pill.Effect = $Glow
-$ui.Bubble.Effect = (New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius = 18; ShadowDepth = 3; Direction = 270; Opacity = 0.4; Color = (ToColor '#000000') })
-foreach ($e in 'Eq1','Eq2','Eq3','Eq4','Eq5','Eq6','Eq7','Eq8') { $ui[$e].Fill = $AccentBrush }
-$ui.EBar.Background = $AccentBrush
-$ui.EApp.Foreground = $AccentBrush
-
-$Layers = 'Compact','Toast','Peek','Expanded'
-foreach ($l in $Layers) {
-  $ui[$l].RenderTransformOrigin = New-Object System.Windows.Point(0.5, 0.3)
-  $ui[$l].RenderTransform = New-Object System.Windows.Media.ScaleTransform(1, 1)
-  $ui[$l].Effect = New-Object System.Windows.Media.Effects.BlurEffect -Property @{ Radius = 0 }
-}
-$PageNames = 'PgMusic','PgTimer','PgNox','PgToday'
-foreach ($pg in $PageNames) {
-  $ui[$pg].RenderTransform = New-Object System.Windows.Media.TranslateTransform(0, 0)
-  $ui[$pg].Effect = New-Object System.Windows.Media.Effects.BlurEffect -Property @{ Radius = 0 }
-}
-
-$Morph = New-Object Island.Morph($ui.Pill, $ui.Body, $ui.Bubble, 170, 34)
-
-# ---------- Etat ----------
-$Isl = @{
-  layer = 'Compact'; target = ''
-  overSince = $null; outSince = $null; expanded = $false
-  toastUntil = [DateTime]::MinValue; peekUntil = [DateTime]::MinValue
-  trackKey = ''; firstTrack = $true; accent = (ToColor $DefaultAccent)
-  timerEnd = $null; timerTotal = 1; timerLabel = ''
-  vol = -2; muted = $null; power = $null; lowWarned = $false; battPct = 100
-  noxNotifId = $null; noxSeen = $false; noxState = 'off'
-  tick = 0; eqOn = $false; hidden = $false; tinted = $null; hwnd = [IntPtr]::Zero
-  page = 'PgToday'; pageList = @(); lastWheel = [DateTime]::MinValue; dotsKey = ''
-  nextBlink = (Get-Date).AddSeconds(3); nextLook = (Get-Date).AddSeconds(5)
-  marqueeKey = ''
-}
-
-# ---------- Animations utilitaires ----------
-function Ease($kind) {
-  if ($kind -eq 'back') { $e = New-Object System.Windows.Media.Animation.BackEase; $e.Amplitude = 0.25 }
-  elseif ($kind -eq 'quint') { $e = New-Object System.Windows.Media.Animation.QuinticEase }
-  else { $e = New-Object System.Windows.Media.Animation.CubicEase }
-  $e.EasingMode = 'EaseOut'; return $e
-}
-function AnimD($target, $prop, [double]$to, [int]$ms, [int]$delay = 0, $ease = 'cubic', $from = $null) {
-  $a = New-Object System.Windows.Media.Animation.DoubleAnimation
-  $a.To = $to
-  if ($null -ne $from) { $a.From = [double]$from }
-  $a.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromMilliseconds($ms))
-  if ($delay -gt 0) { $a.BeginTime = [TimeSpan]::FromMilliseconds($delay) }
-  $a.EasingFunction = Ease $ease
-  $target.BeginAnimation($prop, $a)
-}
-function AnimC($target, $prop, $color, [int]$ms) {
-  $a = New-Object System.Windows.Media.Animation.ColorAnimation
-  $a.To = $color
-  $a.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromMilliseconds($ms))
-  $a.EasingFunction = Ease 'cubic'
-  $target.BeginAnimation($prop, $a)
-}
-
-function Switch-Layer($name) {
-  if ($Isl.layer -eq $name) { return }
-  $Isl.layer = $name
-  foreach ($l in $Layers) {
-    $el = $ui[$l]; $on = ($l -eq $name)
-    $el.IsHitTestVisible = $on
-    $sc = $el.RenderTransform
-    if ($on) {
-      AnimD $el $PropOpacity 1 170 35 'cubic' 0
-      AnimD $sc $PropScaleX 1 260 0 'quint' 0.92
-      AnimD $sc $PropScaleY 1 260 0 'quint' 0.92
-      AnimD $el.Effect $PropBlur 0 200 0 'cubic' 8
-    } else {
-      AnimD $el $PropOpacity 0 90
-      AnimD $sc $PropScaleX 0.96 120
-      AnimD $sc $PropScaleY 0.96 120
-      AnimD $el.Effect $PropBlur 8 100
-    }
-  }
-}
-
-function Measure-Layer($el) {
-  $el.Measure((New-Object System.Windows.Size([double]::PositiveInfinity, [double]::PositiveInfinity)))
-  return $el.DesiredSize
-}
-
-function Set-Eq([bool]$on) {
-  if ($Isl.eqOn -eq $on) { return }
-  $Isl.eqOn = $on
-  $durs = 330, 450, 380, 520, 360, 470, 400, 540
-  $i = 0
-  foreach ($e in 'Eq1','Eq2','Eq3','Eq4','Eq5','Eq6','Eq7','Eq8') {
-    $st = $ui[$e].RenderTransform
-    if ($on) {
-      $a = New-Object System.Windows.Media.Animation.DoubleAnimation
-      $a.From = 0.25; $a.To = 1.0; $a.AutoReverse = $true
-      $a.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromMilliseconds($durs[$i]))
-      $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-      $a.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
-      $st.BeginAnimation($PropScaleY, $a)
-    } else { AnimD $st $PropScaleY 0.3 200 }
-    $i++
-  }
-}
-
-function Set-Accent($color) {
-  $Isl.accent = $color
-  AnimC $AccentBrush $PropColor $color 600
-  $Isl.tinted = $null
-}
-
-# ---------- Yeux de Nox (clignent et regardent autour) ----------
-function Blink {
-  foreach ($e in 'EyeL','EyeR','NEyeL','NEyeR') {
-    $a = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
-    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame(1.0, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::Zero))))
-    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame(0.1, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(70)))))
-    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame(1.0, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(170)))))
-    $ui[$e].RenderTransform.BeginAnimation($PropScaleY, $a)
-  }
-}
-function Update-Eyes {
-  $now = Get-Date
-  if ($now -ge $Isl.nextBlink) {
-    Blink
-    $Isl.nextBlink = $now.AddMilliseconds((Get-Random -Minimum 2500 -Maximum 6500))
-    if ((Get-Random -Maximum 5) -eq 0) { $Isl.nextBlink = $now.AddMilliseconds(260) }   # double clignement
-  }
-  if ($now -ge $Isl.nextLook) {
-    $x = @(-2.5, 0, 0, 2.5)[(Get-Random -Maximum 4)]
-    AnimD $ui.CEyesShift $PropTransX $x 260 0 'quint'
-    $Isl.nextLook = $now.AddMilliseconds((Get-Random -Minimum 3000 -Maximum 8000))
-  }
-}
-
-# ---------- Titre qui défile ----------
-function Set-Marquee($text) {
-  if ($text -eq $Isl.marqueeKey) { return }
-  $Isl.marqueeKey = $text
-  $ui.CTitle.Text = $text
-  $ui.CTitleShift.BeginAnimation($PropTransX, $null); $ui.CTitleShift.X = 0
-  $sz = Measure-Layer $ui.CTitle
-  $tw = [math]::Ceiling($sz.Width)
-  $max = 150
-  $ui.CTitleBox.Width = [math]::Min($tw, $max)
-  if ($tw -gt $max) {
-    $dist = $tw - $max
-    $scroll = [math]::Max(1.5, $dist / 28.0)
-    $a = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
-    $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-    $t1 = 2.2; $t2 = $t1 + $scroll; $t3 = $t2 + 1.8; $t4 = $t3 + 0.45
-    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame(0, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($t1)))))
-    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame((-$dist), [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($t2)))))
-    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame((-$dist), [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($t3)))))
-    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame(0, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($t4)))))
-    $ui.CTitleShift.BeginAnimation($PropTransX, $a)
-  }
-}
-
-# ---------- Toast / Peek ----------
-function Show-Toast($icon, $text, $right, $color, [double]$bar = -1, [int]$ms = 1500) {
-  $ui.TIco.Text = $icon
-  $ui.TIco.Foreground = NewBrush $color
-  $ui.TRight.Text = $right
-  if ($bar -ge 0) {
-    $ui.TText.Visibility = 'Collapsed'; $ui.TBarBg.Visibility = 'Visible'
-    $ui.TBar.Background = NewBrush $color
-    AnimD $ui.TBar $PropWidth ([math]::Max(0, [math]::Min(1, $bar)) * 170) 140
-  } else {
-    $ui.TText.Visibility = 'Visible'; $ui.TBarBg.Visibility = 'Collapsed'
-    $ui.TText.Text = $text
-  }
-  $Isl.toastUntil = (Get-Date).AddMilliseconds($ms)
-}
-function Show-Peek($art, $icon, $iconColor, $iconBg, $app, $title, $sub, [int]$ms = 3200) {
-  $ui.PArt.Source = $art
-  $ui.PIco.Text = $icon
-  $ui.PIco.Foreground = NewBrush $iconColor
-  $ui.PArtBox.Background = NewBrush $iconBg
-  $ui.PApp.Text = $app
-  $ui.PTitle.Text = $title
-  $ui.PSub.Text = $sub
-  $ui.PSub.Visibility = if ($sub) { 'Visible' } else { 'Collapsed' }
-  $Isl.peekUntil = (Get-Date).AddMilliseconds($ms)
-}
-
-# ---------- Batterie ----------
-function Batt-Glyph([int]$pct, [bool]$charging) {
-  $i = [int][math]::Round($pct / 10.0)
-  if ($charging) { if ($i -ge 10) { return [string][char]0xEA93 } elseif ($i -eq 9) { return [string][char]0xE83E } else { return [string][char](0xE85A + $i) } }
-  else { if ($i -ge 10) { return [string][char]0xE83F } else { return [string][char](0xE850 + $i) } }
-}
-function Update-Battery {
-  $ps = [System.Windows.Forms.SystemInformation]::PowerStatus
-  if (($ps.BatteryChargeStatus -band [System.Windows.Forms.BatteryChargeStatus]::NoSystemBattery) -ne 0) { $ui.CRingBox.Visibility = 'Collapsed'; return }
-  $pct = [int][math]::Round($ps.BatteryLifePercent * 100)
-  $Isl.battPct = $pct
-  $online = ($ps.PowerLineStatus -eq [System.Windows.Forms.PowerLineStatus]::Online)
-  $g = Batt-Glyph $pct $online
-  $col = if ($online) { $ChargeColor } elseif ($pct -le 20) { '#FF453A' } else { '#F2F2F7' }
-  $ui.CRing.Stroke = NewBrush $col
-  $ui.CRing.Data = [Island.Fx]::Arc(17, 2.5, ($pct / 100.0))
-  $ui.EBattIco.Text = $g; $ui.EBattIco.Foreground = NewBrush $col
-  $ui.EBattTxt.Text = if ($online) { "$pct % · en charge" } else { "$pct %" }
-  if ($null -ne $Isl.power -and $Isl.power -ne $online) {
-    if ($online) { Show-Toast $g 'En charge' "$pct%" $ChargeColor -ms 2000 } else { Show-Toast $g 'Sur batterie' "$pct%" '#FFFFFF' -ms 2000 }
-  }
-  $Isl.power = $online
-  if (-not $online -and $pct -le 20 -and -not $Isl.lowWarned) { $Isl.lowWarned = $true; Show-Toast $g 'Batterie faible' "$pct%" '#FF453A' -ms 3500 }
-  if ($online) { $Isl.lowWarned = $false }
-}
-
-# ---------- Volume ----------
-function Vol-Glyph([int]$pct, [bool]$muted) {
-  if ($muted) { return [string][char]0xE74F }
-  if ($pct -eq 0) { [string][char]0xE992 } elseif ($pct -lt 34) { [string][char]0xE993 } elseif ($pct -lt 67) { [string][char]0xE994 } else { [string][char]0xE995 }
-}
-function Update-Volume {
-  $v = [Island.Audio]::Level()
-  if ($v -lt 0) { return }
-  $m = [Island.Audio]::Muted()
-  $changed = ($Isl.vol -ge 0) -and (([math]::Abs($v - $Isl.vol) -gt 0.004) -or ($m -ne $Isl.muted))
-  $Isl.vol = $v; $Isl.muted = $m
-  $pct = [int][math]::Round($v * 100)
-  $ico = Vol-Glyph $pct $m
-  $ui.EVolIco.Text = $ico
-  $ui.EVolTxt.Text = if ($m) { 'muet' } else { "$pct %" }
-  if ($changed) {
-    if ($m) { Show-Toast $ico '' 'Muet' '#8E8E93' 0 }
-    else { Show-Toast $ico '' "$pct" '#FFFFFF' $v }
-  }
-}
-
-# ---------- Musique ----------
-function App-Name($id) {
-  if (-not $id) { return '' }
-  $l = $id.ToLower()
-  if ($l -like '*spotify*') { 'Spotify' } elseif ($l -like '*chrome*') { 'Chrome' } elseif ($l -like '*msedge*') { 'Edge' }
-  elseif ($l -like '*firefox*') { 'Firefox' } elseif ($l -like '*deezer*') { 'Deezer' } elseif ($l -like '*zune*' -or $l -like '*media*') { 'Lecteur multimédia' }
-  else { (($id -split '[\\!]')[-1]) -replace '\.exe$','' }
-}
-function Fmt([double]$sec) { if ($sec -lt 0) { $sec = 0 }; $t = [TimeSpan]::FromSeconds([math]::Floor($sec)); if ($t.TotalHours -ge 1) { $t.ToString('h\:mm\:ss') } else { '{0}:{1:00}' -f [int][math]::Floor($t.TotalMinutes), $t.Seconds } }
-
-function Update-Media {
-  $md = $sync.media
-  if ($md -and $md.key -ne $Isl.trackKey) {
-    $Isl.trackKey = $md.key
-    $ui.CArt.Source = $md.art; $ui.EArt.Source = $md.art
-    $ui.ETitle.Text = $md.title; $ui.EArtist.Text = $md.artist
-    $ui.EApp.Text = App-Name $md.app
-    $label = if ($md.artist) { "$($md.title) · $($md.artist)" } else { $md.title }
-    Set-Marquee $label
-    Set-Accent $md.color
-    if (-not $Isl.firstTrack -and $sync.playing) { Show-Peek $md.art '' '#FFFFFF' '#1C1C1E' (App-Name $md.app) $md.title $md.artist 3000 }
-    $Isl.firstTrack = $false
-  }
-  if (-not $md) { $Isl.trackKey = '' }
-  $ui.BPlayIco.Text = if ($sync.playing) { [string][char]0xE769 } else { [string][char]0xE768 }
-  $tl = $sync.timeline
-  if ($md -and $tl -and $tl.end -gt 1) {
-    $cur = $tl.pos
-    if ($sync.playing) { $cur += ([DateTime]::Now - $tl.at).TotalSeconds }
-    $cur = [math]::Min($cur, $tl.end)
-    $ui.EProg.Visibility = 'Visible'
-    $ui.EBarScale.ScaleX = [math]::Max(0, [math]::Min(1, $cur / $tl.end))
-    $ui.EPos.Text = Fmt $cur
-    $ui.ELeft.Text = '-' + (Fmt ($tl.end - $cur))
-  } else { $ui.EProg.Visibility = 'Collapsed' }
-}
-function Media-Do($what) { $sync.cmds.Enqueue($what) }
-
-# ---------- Nox ----------
-function Set-Nox($state, $text, $task) {
-  $Isl.noxState = $state
-  $col = switch ($state) { 'online' { '#30D158' } 'busy' { $DefaultAccent } 'down' { '#FF453A' } default { '#8E8E93' } }
-  $glow = switch ($state) { 'online' { '#9BF0B0' } 'busy' { '#B9B4FF' } 'down' { '#FF8A80' } default { '#B9B4FF' } }
-  $ui.NDot.Fill = NewBrush $col
-  $ui.NState.Text = $text
-  $ui.NTask.Text = $task
-  $ui.NTask.Visibility = if ($task) { 'Visible' } else { 'Collapsed' }
-  $c = ToColor $glow
-  if ("$c" -ne "$($EyeGlowFx.Color)") { AnimC $EyeGlowFx $PropFxColor $c 500; AnimC $EyeGlowFx2 $PropFxColor $c 500 }
-}
-function Update-Nox {
-  if (-not $NoxStatusUrl) { Set-Nox 'off' 'pas encore relié' 'Bientôt : son statut et ses messages ici.'; return }
-  $n = $sync.nox
-  if (-not $n) { Set-Nox 'off' 'connexion…' ''; return }
-  if (-not $n.ok) { Set-Nox 'down' 'injoignable' ''; return }
-  try {
-    $j = $n.json | ConvertFrom-Json
-    if ($j.statut -eq 'occupe' -or $j.statut -eq 'occupé') { Set-Nox 'busy' 'au travail' ([string]$j.tache) }
-    else { Set-Nox 'online' 'en ligne' ([string]$j.tache) }
-    if ($j.notification -and $j.notification.id -and $j.notification.id -ne $Isl.noxNotifId) {
-      $first = -not $Isl.noxSeen
-      $Isl.noxNotifId = $j.notification.id
-      $ui.NLast.Text = [string]$j.notification.texte
-      if (-not $first) { Show-Peek $null ([string][char]0xE8BD) '#FFFFFF' $DefaultAccent 'Nox' 'Nox' ([string]$j.notification.texte) 5000 }
-    }
-    $Isl.noxSeen = $true
-  } catch { Set-Nox 'down' 'réponse illisible' '' }
-}
-
-# ---------- Minuteur ----------
-function Start-Timer([int]$min, $label) { $Isl.timerEnd = (Get-Date).AddMinutes($min); $Isl.timerTotal = $min * 60; $Isl.timerLabel = $label }
-function Update-Timer {
-  if (-not $Isl.timerEnd) {
-    $ui.CTimer.Text = ''
-    $ui.TRing.Data = $null; $ui.TRingTxt.Text = '25:00'
-    $ui.TLabel.Text = 'Minuteur'; $ui.TSub.Text = 'Prêt quand tu l''es'
-    $ui.BTStop.Visibility = 'Collapsed'; $ui.BT25.Visibility = 'Visible'; $ui.BT5.Visibility = 'Visible'
-    return
-  }
-  $left = $Isl.timerEnd - (Get-Date)
-  if ($left.TotalSeconds -le 0) {
-    $lbl = $Isl.timerLabel; $Isl.timerEnd = $null
-    [System.Media.SystemSounds]::Asterisk.Play()
-    Show-Peek $null ([string][char]0xE916) '#FFFFFF' $TimerColor 'Minuteur' "$lbl terminé" $(if ($lbl -eq 'Focus') { 'Prends une pause de 5 min' } else { 'On reprend ?' }) 6000
-    Update-Timer; return
-  }
-  $txt = '{0:00}:{1:00}' -f [int][math]::Floor($left.TotalMinutes), $left.Seconds
-  $frac = $left.TotalSeconds / $Isl.timerTotal
-  $ui.CTimer.Text = $txt
-  $ui.TRingTxt.Text = $txt
-  $ui.TRing.Data = [Island.Fx]::Arc(64, 5, $frac)
-  $ui.TLabel.Text = $Isl.timerLabel
-  $ui.TSub.Text = 'Fin à ' + $Isl.timerEnd.ToString('HH:mm')
-  $ui.RingTxt.Text = [string][int][math]::Ceiling($left.TotalMinutes)
-  $ui.Ring.Data = [Island.Fx]::Arc(24, 3, $frac)
-  $ui.BTStop.Visibility = 'Visible'; $ui.BT25.Visibility = 'Collapsed'; $ui.BT5.Visibility = 'Collapsed'
-}
-
-# ---------- Pages de la vue étendue ----------
-function Page-List {
-  $l = @()
-  if ($sync.media) { $l += 'PgMusic' }
-  $l += 'PgTimer', 'PgNox', 'PgToday'
-  return ,$l
-}
-function Update-Dots($list) {
-  $key = ($list -join ',') + '|' + $Isl.page
-  if ($key -eq $Isl.dotsKey) { return }
-  $rebuild = ($ui.Dots.Children.Count -ne $list.Count)
-  $Isl.dotsKey = $key
-  if ($rebuild) {
-    $ui.Dots.Children.Clear()
-    foreach ($p in $list) {
-      $d = New-Object System.Windows.Controls.Border
-      $d.Height = 6; $d.Width = 6; $d.CornerRadius = New-Object System.Windows.CornerRadius 3
-      $d.Margin = New-Object System.Windows.Thickness(3, 0, 3, 0)
-      $d.Background = NewBrush '#55FFFFFF'
-      $null = $ui.Dots.Children.Add($d)
-    }
-  }
-  for ($i = 0; $i -lt $list.Count; $i++) {
-    $d = $ui.Dots.Children[$i]
-    $on = ($list[$i] -eq $Isl.page)
-    AnimD $d $PropWidth $(if ($on) { 18 } else { 6 }) 220 0 'quint'
-    $d.Background = if ($on) { NewBrush '#F2F2F7' } else { NewBrush '#55FFFFFF' }
-  }
-}
-function Show-Page($name, [int]$dir = 0) {
-  foreach ($pg in $PageNames) {
-    $el = $ui[$pg]
-    if ($pg -eq $name) {
-      $el.Visibility = 'Visible'
-      if ($dir -ne 0) {
-        AnimD $el.RenderTransform $PropTransX 0 300 0 'quint' (36 * $dir)
-        AnimD $el $PropOpacity 1 200 0 'cubic' 0
-        AnimD $el.Effect $PropBlur 0 220 0 'cubic' 6
-      }
-    } else { $el.Visibility = 'Collapsed' }
-  }
-  $Isl.page = $name
-}
-function Next-Page([int]$dir) {
-  $list = Page-List
-  $i = [array]::IndexOf($list, $Isl.page)
-  if ($i -lt 0) { $i = 0 }
-  $j = $i + $dir
-  if ($j -lt 0 -or $j -ge $list.Count) {
-    # petit rebond en bout de liste
-    AnimD $ui.Pages.RenderTransform $PropTransX 0 260 0 'quint' (-8 * $dir)
-    return
-  }
-  Show-Page $list[$j] $dir
-  $Isl.target = ''   # recalcul de la taille
-}
-$ui.Pages.RenderTransform = New-Object System.Windows.Media.TranslateTransform(0, 0)
-
-# ---------- Etat -> forme ----------
-function Update-Layout {
-  $now = Get-Date
-  $md = $sync.media
-  $hasMedia = ($null -ne $md)
-  $playing = $hasMedia -and $sync.playing
-  $timerOn = ($null -ne $Isl.timerEnd)
-
-  $ui.CClock.Text = $now.ToString('HH:mm'); $ui.EClock.Text = $now.ToString('HH:mm')
-  $ui.EDate.Text = $fr.TextInfo.ToTitleCase($now.ToString('dddd d MMMM', $fr))
-
-  # survol avec intention : ouverture rapide, fermeture un peu retardée
-  $over = $ui.Pill.IsMouseOver -or $ui.Pill.ContextMenu.IsOpen
-  if ($over) { $Isl.outSince = $null; if (-not $Isl.overSince) { $Isl.overSince = $now } }
-  else { $Isl.overSince = $null; if (-not $Isl.outSince) { $Isl.outSince = $now } }
-  $wasExpanded = $Isl.expanded
-  if ($Isl.expanded) { if ($Isl.outSince -and ($now - $Isl.outSince).TotalMilliseconds -gt 220) { $Isl.expanded = $false } }
-  else { if ($Isl.overSince -and ($now - $Isl.overSince).TotalMilliseconds -ge 90) { $Isl.expanded = $true } }
-  if ($Isl.expanded -and -not $wasExpanded) {
-    # page d'ouverture : la musique si elle joue, sinon le minuteur s'il tourne, sinon la dernière vue
-    if ($playing) { Show-Page 'PgMusic' } elseif ($timerOn) { Show-Page 'PgTimer' }
-    elseif ($Isl.page -eq 'PgMusic' -and -not $hasMedia) { Show-Page 'PgToday' } else { Show-Page $Isl.page }
-  }
-
-  $bubble = 0
-  if ($Isl.expanded) {
-    $layer = 'Expanded'
-    $list = Page-List
-    if ($list -notcontains $Isl.page) { Show-Page 'PgToday' }
-    Update-Dots $list
-    $sz = Measure-Layer $ui.Expanded
-    $w = 440; $h = [math]::Ceiling($sz.Height); $r = 28; $resp = 0.34; $damp = 0.78
-  } elseif ($now -lt $Isl.toastUntil) {
-    $layer = 'Toast'; $w = 300; $h = 34; $r = 16; $resp = 0.3; $damp = 0.8
-  } elseif ($now -lt $Isl.peekUntil) {
-    $layer = 'Peek'
-    $sz = Measure-Layer $ui.Peek
-    $w = [math]::Ceiling($sz.Width); $h = [math]::Ceiling($sz.Height); $r = 24; $resp = 0.34; $damp = 0.78
-  } else {
-    $layer = 'Compact'
-    $music = $playing
-    $ui.CArtBox.Visibility   = if ($music) { 'Visible' } else { 'Collapsed' }
-    $ui.CTitleBox.Visibility = if ($music) { 'Visible' } else { 'Collapsed' }
-    $ui.CEq.Visibility       = if ($music) { 'Visible' } else { 'Collapsed' }
-    $ui.CRingBox.Visibility  = if ($music) { 'Collapsed' } else { 'Visible' }
-    $ui.CTimer.Visibility    = if ($timerOn -and -not $music) { 'Visible' } else { 'Collapsed' }
-    $ui.CClock.Visibility    = if ($music -or $timerOn) { 'Collapsed' } else { 'Visible' }
-    $ui.CEyes.Visibility     = if ($music) { 'Collapsed' } else { 'Visible' }
-    # en minuteur seul, l'anneau de gauche montre le minuteur
-    if ($timerOn -and -not $music) {
-      $ui.CRing.Stroke = NewBrush $TimerColor
-      $ui.CRing.Data = [Island.Fx]::Arc(17, 2.5, (($Isl.timerEnd - $now).TotalSeconds / $Isl.timerTotal))
-      $Isl.ringIsTimer = $true
-    } elseif ($Isl.ringIsTimer) { $Isl.ringIsTimer = $false; Update-Battery }
-    $sz = Measure-Layer $ui.Compact
-    $w = [math]::Max(150, [math]::Ceiling($sz.Width)); $h = 34; $r = 16
-    $resp = 0.3; $damp = 0.86
-    if ($music -and $timerOn) { $bubble = 34 }
-  }
-
-  Set-Eq $playing
-  if (-not $playing -or $Isl.expanded) { Update-Eyes }
-
-  $key = "$layer|$w|$h|$bubble"
-  if ($key -ne $Isl.target) {
-    $Isl.target = $key
-    $Morph.To($w, $h, $r, $resp, $damp)
-    $Morph.BubbleTo($bubble)
-  }
-  Switch-Layer $layer
-
-  # teinte en bas de la pilule : pochette quand ça joue, violet Nox sinon
-  $level = 0.0; $col = ToColor $DefaultAccent
-  if ($hasMedia -and ($playing -or $layer -eq 'Expanded')) { $col = $Isl.accent; $level = if ($layer -eq 'Compact') { 0.42 } else { 0.55 } }
-  elseif ($layer -eq 'Compact' -or $layer -eq 'Expanded') { $level = if ($layer -eq 'Compact') { 0.28 } else { 0.38 } }
-  $tintKey = "$level|$col"
-  if ($tintKey -ne $Isl.tinted) {
-    $Isl.tinted = $tintKey
-    AnimC $TintStop $PropStop ([Island.Fx]::Shade($col, $level)) 450
-    if ($layer -eq 'Expanded' -and $hasMedia) { AnimC $Glow $PropFxColor ([Island.Fx]::Shade($col, 0.7)) 450; AnimD $Glow $PropFxOp 0.5 450 }
-    else { AnimC $Glow $PropFxColor (ToColor '#000000') 350; AnimD $Glow $PropFxOp 0.4 350 }
-  }
-}
-
-# ---------- Evénements ----------
-$ui.BPlay.Add_Click({ Media-Do 'play' })
-$ui.BNext.Add_Click({ Media-Do 'next' })
-$ui.BPrev.Add_Click({ Media-Do 'prev' })
-$ui.EBarHit.Add_MouseLeftButtonUp({
-  param($snd, $ev)
-  $tl = $sync.timeline
-  if ($tl -and $tl.end -gt 1) {
-    $frac = [math]::Max(0, [math]::Min(1, $ev.GetPosition($ui.EBarHit).X / $ui.EBarHit.ActualWidth))
-    Media-Do ("seek:" + [int]($frac * $tl.end * 1000))
-    $sync.timeline = @{ pos = $frac * $tl.end; end = $tl.end; at = [DateTime]::Now }
-  }
-})
-$ui.BT25.Add_Click({ Start-Timer 25 'Focus'; Update-Timer })
-$ui.BT5.Add_Click({ Start-Timer 5 'Pause'; Update-Timer })
-$ui.BTStop.Add_Click({ $Isl.timerEnd = $null; Update-Timer })
-
-# molette / pavé tactile : changer de widget
-$ui.Pill.Add_PreviewMouseWheel({
-  param($snd, $ev)
-  if (-not $Isl.expanded) { return }
-  $ev.Handled = $true
-  $now = Get-Date
-  if (($now - $Isl.lastWheel).TotalMilliseconds -lt 320) { return }
-  $Isl.lastWheel = $now
-  if ($ev.Delta -lt 0) { Next-Page 1 } else { Next-Page -1 }
-})
-
-# petit "écrasement" au clic, comme sur iPhone
-$ui.Pill.Add_PreviewMouseLeftButtonDown({ AnimD $ui.PillScale $PropScaleX 0.97 90; AnimD $ui.PillScale $PropScaleY 0.97 90 })
-$ui.Pill.Add_PreviewMouseLeftButtonUp({ AnimD $ui.PillScale $PropScaleX 1 300 0 'back'; AnimD $ui.PillScale $PropScaleY 1 300 0 'back' })
-$ui.Pill.Add_MouseLeave({ AnimD $ui.PillScale $PropScaleX 1 200; AnimD $ui.PillScale $PropScaleY 1 200 })
-
-# menu clic droit
-$menu = New-Object System.Windows.Controls.ContextMenu
-$miVer = New-Object System.Windows.Controls.MenuItem -Property @{ Header = "Dynamic Island v$Version"; IsEnabled = $false }
-$miUpd = New-Object System.Windows.Controls.MenuItem -Property @{ Header = 'Mises à jour automatiques (GitHub)'; IsEnabled = $false }
-$miLog = New-Object System.Windows.Controls.MenuItem -Property @{ Header = 'Ouvrir le journal' }
-$miRestart = New-Object System.Windows.Controls.MenuItem -Property @{ Header = 'Redémarrer' }
-$miQuit = New-Object System.Windows.Controls.MenuItem -Property @{ Header = 'Quitter' }
-$miLog.Add_Click({ Start-Process notepad.exe $LogPath })
-$miRestart.Add_Click({ $script:restart = $true; $win.Close() })
-$miQuit.Add_Click({ $win.Close() })
-foreach ($mi in $miVer, $miUpd, (New-Object System.Windows.Controls.Separator), $miLog, $miRestart, $miQuit) { $null = $menu.Items.Add($mi) }
-$ui.Pill.ContextMenu = $menu
-
-$win.Dispatcher.Add_UnhandledException({
-  param($snd, $ev)
-  Log ("EXCEPTION : " + $ev.Exception.ToString())
-  $ev.Handled = $true
-})
-$win.Add_ContentRendered({ Log "fenêtre affichée à l'écran" })
-$win.Add_SourceInitialized({
-  Log "fenêtre créée"
-  $Isl.hwnd = (New-Object System.Windows.Interop.WindowInteropHelper $win).Handle
-  [Island.Win]::NoActivate($Isl.hwnd)
-})
-function Place-Window {
-  $wa = [System.Windows.SystemParameters]::WorkArea
-  $win.Left = $wa.Left + ($wa.Width - $win.Width) / 2
-  $win.Top = 0
-}
-Place-Window
-
-$timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromMilliseconds(80)
-$timer.Add_Tick({
-  $Isl.tick++
-  $sync.uiBeat = [DateTime]::Now
-  Step "cycle $($Isl.tick) volume"
-  if ($Isl.tick % 60 -eq 0) { [Island.Audio]::Reset() }
-  try { Update-Volume } catch { Log ("volume : " + $_.Exception.Message) }
-  Step "cycle $($Isl.tick) musique"
-  try { Update-Media } catch { Log ("musique : " + $_.Exception.Message) }
-  if ($Isl.tick % 6 -eq 1) {
-    try { Update-Timer } catch { Log ("minuteur : " + $_.Exception.Message) }
-  }
-  if ($Isl.tick % 12 -eq 1) {
-    Step "cycle $($Isl.tick) batterie/nox/plein écran"
-    try { if (-not $Isl.ringIsTimer) { Update-Battery } } catch { Log ("batterie : " + $_.Exception.Message) }
-    try { $wa = [System.Windows.SystemParameters]::WorkArea; if ("$wa" -ne $Isl.wa) { $Isl.wa = "$wa"; Place-Window } } catch {}
-    try { Update-Nox } catch { Log ("nox : " + $_.Exception.Message) }
-    try {
-      if ($HideInFullscreen -and $Isl.hwnd -ne [IntPtr]::Zero) {
-        $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-        $fs = [Island.Win]::ForegroundIsFullscreen($b.Width, $b.Height, $Isl.hwnd)
-        if ($fs -ne $Isl.hidden) { $Isl.hidden = $fs; AnimD $ui.Row $PropOpacity ([double](-not $fs)) 220; $ui.Row.IsHitTestVisible = -not $fs }
-      }
-    } catch { Log ("plein écran : " + $_.Exception.Message) }
-  }
-  if ($sync.updated -and -not $Isl.updShown) {
-    $Isl.updShown = $true; $Isl.restartAt = (Get-Date).AddSeconds(4)
-    Show-Peek $null ([string][char]0xE895) '#FFFFFF' $ChargeColor 'Dynamic Island' "Mise à jour v$($sync.updated)" 'Redémarrage…' 4000
-  }
-  if ($Isl.restartAt -and (Get-Date) -ge $Isl.restartAt -and -not $Isl.expanded) { $script:restart = $true; $win.Close() }
-  if ($Isl.tick -eq 40 -or $Isl.tick % 4000 -eq 0) {
-    Log ("diag : visible={0} pilule={1:N0}x{2:N0} masquée={3} couche={4} page={5} musique={6}" -f $win.IsVisible, $ui.Pill.ActualWidth, $ui.Pill.ActualHeight, $Isl.hidden, $Isl.layer, $Isl.page, ($null -ne $sync.media))
-  }
-  Step "cycle $($Isl.tick) affichage"
-  try { Update-Layout } catch { Log ("affichage : " + $_.Exception.Message + " (ligne " + $_.InvocationInfo.ScriptLineNumber + ")") }
-})
-
-Step 'init batterie'; Update-Battery
-Step 'init minuteur'; Update-Timer
-Step 'init nox'; Update-Nox
-Show-Page 'PgToday'
-$ui.Expanded.Opacity = 0; $ui.Toast.Opacity = 0; $ui.Peek.Opacity = 0
-$timer.Start()
-Log "démarrée"
-$sync.uiStart = [DateTime]::Now
-Step 'ouverture de la fenêtre'
+Log 'démarrée'
 try { $null = $win.ShowDialog() } catch { Log ("ShowDialog : " + $_.Exception.ToString()) }
 Log 'fenêtre fermée'
 
 # ---------- Fermeture ----------
-$timer.Stop()
 $sync.stop = $true
-try { $bg.Stop(); $bg.Dispose(); $rs.Close() } catch {}
-try { $script:mutex.ReleaseMutex() } catch {}
-if ($script:restart) {
-  Start-Process (Join-Path $env:WINDIR 'System32\conhost.exe') ('--headless powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "' + $MyInvocation.MyCommand.Path + '"')
-}
+foreach ($w in $workers) { try { $null = $w.BeginStop($null, $null) } catch {} }
+if ($sync.restart) { Restart-Island } else { try { $script:mutex.ReleaseMutex() } catch {} }
