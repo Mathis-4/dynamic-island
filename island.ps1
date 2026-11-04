@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.16'
+$Version = '4.17'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -289,6 +289,7 @@ namespace Island {
     static readonly Color EventColor = Color.FromRgb(0x0A, 0x84, 0xFF);
     bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
     DispatcherTimer waveTimer; double progressFrac, wavePhase, waveAmp; DateTime lastWave = DateTime.Now;
+    DateTime holdUntil = DateTime.MinValue;
     bool noxUnread, peeking, tilted; string clockShown = ""; string eyeModeShown = ""; string lastSong = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
@@ -350,7 +351,12 @@ namespace Island {
 
       // survol : ouverture rapide, fermeture un peu retardée
       hoverTimer = new DispatcherTimer(DispatcherPriority.Normal, win.Dispatcher);
-      hoverTimer.Tick += delegate { hoverTimer.Stop(); SetExpanded(mouseIn || typing); };
+      hoverTimer.Tick += delegate {
+        hoverTimer.Stop();
+        // juste après un changement de widget, la vue peut rétrécir et laisser la souris en dessous : on attend qu'elle revienne
+        if (!mouseIn && expandedOn && DateTime.Now < holdUntil) { hoverTimer.Interval = TimeSpan.FromMilliseconds(150); hoverTimer.Start(); return; }
+        SetExpanded(mouseIn || typing);
+      };
       win.MouseEnter += delegate { mouseIn = true; Hover(); };
       win.MouseLeave += delegate { mouseIn = false; Hover(); };
       win.PreviewMouseLeftButtonDown += delegate { Squish(0.97, 90); };
@@ -689,6 +695,7 @@ namespace Island {
           }
         } else el.Visibility = Visibility.Collapsed;
       }
+      if (name != page && expandedOn) holdUntil = DateTime.Now.AddMilliseconds(1600);
       page = name;
       if (name == "PgNox" && expandedOn) noxUnread = false;
       List<string> l = PageList();
@@ -812,7 +819,7 @@ namespace Island {
         // la vue ne rétrécit pas tant que la souris est dessus (sinon elle se refermerait sous le curseur)
         string ek = page + "|" + VisKey("NConfirm") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
         if (ek != expKey) { expKey = ek; expanded.Height = double.NaN; expNatural = Math.Ceiling(Natural(expanded, 440).Height); }
-        stickyH = Math.Max(stickyH, expNatural);
+        stickyH = expNatural;   // chaque widget a sa hauteur (plus de vide) ; un délai de grâce évite la fermeture sous le curseur
         expanded.Height = stickyH;
         w = 440; h = stickyH; r = 30; resp = 0.42; damp = 0.8;
       } else if (now < toastUntil) {
