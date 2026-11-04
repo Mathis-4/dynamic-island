@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.6'
+$Version = '4.7'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -285,6 +285,7 @@ namespace Island {
     HashSet<string> evPeeked = new HashSet<string>();
     static readonly Color EventColor = Color.FromRgb(0x0A, 0x84, 0xFF);
     bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
+    bool noxUnread, peeking, tilted;
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
     DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
@@ -333,9 +334,6 @@ namespace Island {
       earL.Fill = Brushes.Black; earR.Fill = Brushes.Black;
       eyeGlow = new DropShadowEffect { BlurRadius = 8, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
       eyeGlow2 = new DropShadowEffect { BlurRadius = 12, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
-      E<FrameworkElement>("CEyes").Effect = eyeGlow;
-      E<FrameworkElement>("NEyes").Effect = eyeGlow2;
-      E<FrameworkElement>("BEyes").Effect = eyeGlow;
 
       W = new Spring(160); H = new Spring(34); R = new Spring(16); B = new Spring(0);
       Apply();
@@ -498,6 +496,8 @@ namespace Island {
       clipHost.Clip = g;
       ((TranslateTransform)earL.RenderTransform).X = x - 12;
       ((TranslateTransform)earR.RenderTransform).X = x + w;
+      FrameworkElement pk = E<FrameworkElement>("Peeker");
+      Canvas.SetLeft(pk, x + w - 46); Canvas.SetTop(pk, h - 13);
       double b = Math.Max(0, B.Value);
       bubble.Width = b; bubble.Height = b; bubble.CornerRadius = new CornerRadius(b / 2);
       bubble.Opacity = Math.Max(0, Math.Min(1, b / 30));
@@ -642,6 +642,7 @@ namespace Island {
         } else el.Visibility = Visibility.Collapsed;
       }
       page = name;
+      if (name == "PgNox" && expandedOn) noxUnread = false;
       List<string> l = PageList();
       string order = string.Join(",", l.ToArray());
       if (order != tabOrder) {   // remet les onglets dans le même ordre que les pages
@@ -751,18 +752,31 @@ namespace Island {
         if (ck != compactKey) { compactKey = ck; compactW = Math.Max(150, Math.Ceiling(Natural(compact, double.NaN).Width)); }
         w = compactW; h = 34; r = 16; resp = 0.34; damp = 0.86;
         if (music && timerOn) {
-          bub = 32; Vis("BRing", true); Vis("BEyes", false);
+          bub = 32;
           E<Path>("Ring").Stroke = Br(timerColor); E<TextBlock>("RingTxt").Foreground = Br(timerColor);
         } else if (music && ev) {
-          bub = 32; Vis("BRing", true); Vis("BEyes", false);
+          bub = 32;
           E<Path>("Ring").Stroke = Br(EventColor); E<TextBlock>("RingTxt").Foreground = Br(EventColor);
           E<Path>("Ring").Data = Fx.Arc(22, 2.5, Math.Max(0.001, evMin / 15.0));
           E<TextBlock>("RingTxt").Text = evMin > 0.5 ? ((int)Math.Ceiling(evMin)).ToString() : "!";
         }
-        else if (music && noxBusy) { bub = 32; Vis("BRing", false); Vis("BEyes", true); }
+
       }
       SetEq(playing);
-      if (!playing || expandedOn || bub > 0) UpdateEyes(now);
+      UpdateEyes(now);
+      // pendant la musique, Nox jette un œil sous la pilule quand il travaille ou a un message pour toi
+      bool wantPeek = name == "Compact" && playing && (noxState == "busy" || noxUnread);
+      if (wantPeek != peeking) {
+        peeking = wantPeek;
+        Anim((TranslateTransform)E<UIElement>("Peeker").RenderTransform, TranslateTransform.YProperty, wantPeek ? 9 : 0, wantPeek ? 520 : 260, 0, wantPeek ? Back(0.5) : null);
+      }
+      // tête penchée quand il a quelque chose pour toi (comme dans l'appli)
+      bool attentive = noxUnread || (G(G(sync, "nox") as Hashtable, "confirm") != null);
+      if (attentive != tilted) {
+        tilted = attentive;
+        foreach (string tn in new[] { "CEyes", "PkMaskBox" }) Anim((RotateTransform)E<UIElement>(tn).RenderTransform, RotateTransform.AngleProperty, attentive ? -12 : 0, 420, 0, Back(0.5));
+        Anim((RotateTransform)E<UIElement>("NOwl").RenderTransform, RotateTransform.AngleProperty, attentive ? -10 : 0, 420, 0, Back(0.5));
+      }
 
       string key = name + "|" + w + "|" + h + "|" + bub;
       ShowLayer(name, w);
@@ -802,7 +816,7 @@ namespace Island {
     // ---------------- yeux de Nox ----------------
     void UpdateEyes(DateTime now) {
       if (now >= nextBlink) {
-        foreach (string e in new[] { "EyeL", "EyeR", "NEyeL", "NEyeR", "BEyeL", "BEyeR" }) {
+        foreach (string e in new[] { "EyeL", "EyeR", "NEyeL", "NEyeR", "PkL", "PkR" }) {
           DoubleAnimationUsingKeyFrames a = new DoubleAnimationUsingKeyFrames();
           a.KeyFrames.Add(new LinearDoubleKeyFrame(1.0, KeyTime.FromTimeSpan(TimeSpan.Zero)));
           a.KeyFrames.Add(new EasingDoubleKeyFrame(0.1, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(70))));
@@ -815,10 +829,11 @@ namespace Island {
       bool busy = noxState == "busy";
       if (now >= nextLook) {
         Random rnd = new Random();
-        double[] xs = busy ? new[] { -2.5, 2.5 } : new[] { -2.5, 0, 0, 2.5 };
-        double x = busy ? (((TranslateTransform)E<UIElement>("CEyes").RenderTransform).X > 0 ? -2.5 : 2.5) : xs[rnd.Next(xs.Length)];
-        foreach (string e in new[] { "CEyes", "NEyes" })
-          Anim((TranslateTransform)E<UIElement>(e).RenderTransform, TranslateTransform.XProperty, x * (e == "NEyes" ? 1.6 : 1), 280, 0, Quint());
+        // les pupilles bougent dans le masque (lecture de gauche à droite quand il travaille)
+        double[] xs = new[] { -1.4, 0, 0, 1.4 };
+        double x = busy ? (((TranslateTransform)E<UIElement>("CPupils").RenderTransform).X > 0 ? -1.4 : 1.4) : xs[rnd.Next(xs.Length)];
+        foreach (string e in new[] { "CPupils", "PkPupils", "NPupils" })
+          Anim((TranslateTransform)E<UIElement>(e).RenderTransform, TranslateTransform.XProperty, x * (e == "NPupils" ? 2.4 : 1), 280, 0, Quint());
         nextLook = busy ? now.AddMilliseconds(700) : now.AddMilliseconds(rnd.Next(3000, 8000));
       }
     }
@@ -1047,7 +1062,12 @@ namespace Island {
       E<TextBlock>("NState").Text = text;
       E<TextBlock>("NAct").Text = act;
       Vis("NAct", act.Length > 0);
-      if (eyeGlow.Color != glow) { AnimColor(eyeGlow, DropShadowEffect.ColorProperty, glow, 500); AnimColor(eyeGlow2, DropShadowEffect.ColorProperty, glow, 500); }
+      // masque bordé de rouge en cas d'erreur, estompé quand Nox est introuvable (charte de Nox)
+      foreach (string mk in new[] { "EyeMask", "PkMask", "NMask" }) {
+        Border mb = E<Border>(mk);
+        mb.BorderThickness = new Thickness(state == "down" ? (mk == "NMask" ? 2.5 : 1.2) : 0);
+      }
+      E<UIElement>("CEyes").Opacity = state == "off" ? 0.55 : 1;
       if (n == null || !Bool(G(n, "ok"))) { Vis("NConfirm", false); return; }
       Hashtable wd = G(n, "widget") as Hashtable;
       if (wd != null) {
@@ -1074,11 +1094,12 @@ namespace Island {
         if (id != noxMsgId) {
           bool first = !noxSeen;
           noxMsgId = id;
+          if (!first && !(expandedOn && page == "PgNox")) noxUnread = true;
           if (!first && !(expandedOn && page == "PgNox")) {
             string flat = txt.Replace("\r", " ").Replace("\n", " ").Replace("**", "");
             string t1 = flat.Length > 60 ? flat.Substring(0, 60).TrimEnd() + "…" : flat;
             string t2 = flat.Length > 60 ? (flat.Length > 140 ? flat.Substring(60, 80).Trim() + "…" : flat.Substring(60).Trim()) : "";
-            ShowPeek(null, "", "#FFFFFF", "#5E5CE6", "Nox", t1, t2, 6000, false);
+            ShowPeek(null, "", "#FFFFFF", "#849C8B", "Nox", t1, t2, 6000, false);
           }
         }
       }
@@ -1163,7 +1184,7 @@ namespace Island {
         lastDrag = DateTime.Now;
         if (!dragging) {
           dragging = true;
-          ShowPeek(null, "\uE898", "#FFFFFF", "#5E5CE6", "Nox", "Dépose le fichier ici", "Nox te proposera où le ranger", 60000, false);
+          ShowPeek(null, "\uE898", "#FFFFFF", "#849C8B", "Nox", "Dépose le fichier ici", "Nox te proposera où le ranger", 60000, false);
           Refresh();
         }
       } else e.Effects = DragDropEffects.None;
@@ -1621,6 +1642,26 @@ $workers = @(
   <Canvas x:Name="Root" Width="520" Height="320" RenderTransformOrigin="0.5,0">
     <Canvas.RenderTransform><ScaleTransform/></Canvas.RenderTransform>
 
+    <!-- Nox qui jette un œil sous la pilule (quand il travaille ou a un message pendant la musique) -->
+    <Grid x:Name="Peeker">
+      <Grid.RenderTransform><TranslateTransform/></Grid.RenderTransform>
+      <Grid x:Name="PkMaskBox" Width="24" Height="12" RenderTransformOrigin="0.5,0.5">
+            <Grid.RenderTransform><RotateTransform/></Grid.RenderTransform>
+            <Border x:Name="PkMask" CornerRadius="6" Background="#F4EFE6" BorderBrush="#FF453A" BorderThickness="0"/>
+            <Canvas x:Name="PkPupils" Width="24" Height="12">
+              <Canvas.RenderTransform><TranslateTransform/></Canvas.RenderTransform>
+              <Grid x:Name="PkL" Width="5.2" Height="5.2" Canvas.Left="3.7" Canvas.Top="3.4" RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
+                <Ellipse Fill="#3A3734"/><Ellipse Width="1.6" Height="1.6" Fill="#F4EFE6" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="2.6,0.9,0,0"/>
+              </Grid>
+              <Grid x:Name="PkR" Width="5.2" Height="5.2" Canvas.Left="15.1" Canvas.Top="3.4" RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
+                <Ellipse Fill="#3A3734"/><Ellipse Width="1.6" Height="1.6" Fill="#F4EFE6" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="2.6,0.9,0,0"/>
+              </Grid>
+            </Canvas>
+          </Grid>
+    </Grid>
+
     <!-- la forme (dessinée image par image) -->
     <Path x:Name="Shape"/>
     <Path x:Name="EarL" Data="M0,0 L12,0 L12,12 A12,12 0 0 0 0,0 Z"><Path.RenderTransform><TranslateTransform/></Path.RenderTransform></Path>
@@ -1634,10 +1675,6 @@ $workers = @(
           <Ellipse Width="22" Height="22" Stroke="#33FF9F0A" StrokeThickness="2.5"/>
           <Path x:Name="Ring" Width="22" Height="22" Stroke="$TimerColor" StrokeThickness="2.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
           <TextBlock x:Name="RingTxt" FontSize="9" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" Foreground="$TimerColor" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-        </Grid>
-        <Grid x:Name="BEyes" Width="18" Height="10" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed">
-          <Ellipse x:Name="BEyeL" Width="5" Height="9" Fill="#F5F5FA" HorizontalAlignment="Left" Margin="2,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
-          <Ellipse x:Name="BEyeR" Width="5" Height="9" Fill="#F5F5FA" HorizontalAlignment="Right" Margin="0,0,2,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
         </Grid>
       </Grid>
     </Border>
@@ -1672,10 +1709,20 @@ $workers = @(
             <Rectangle x:Name="Eq3" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
             <Rectangle x:Name="Eq4" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
           </StackPanel>
-          <Grid x:Name="CEyes" Width="24" Height="12" VerticalAlignment="Center">
-            <Grid.RenderTransform><TranslateTransform/></Grid.RenderTransform>
-            <Ellipse x:Name="EyeL" Width="6" Height="11" Fill="#F5F5FA" HorizontalAlignment="Left" Margin="4,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
-            <Ellipse x:Name="EyeR" Width="6" Height="11" Fill="#F5F5FA" HorizontalAlignment="Right" Margin="0,0,4,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+          <Grid x:Name="CEyes" Width="24" Height="12" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+            <Grid.RenderTransform><RotateTransform/></Grid.RenderTransform>
+            <Border x:Name="EyeMask" CornerRadius="6" Background="#F4EFE6" BorderBrush="#FF453A" BorderThickness="0"/>
+            <Canvas x:Name="CPupils" Width="24" Height="12">
+              <Canvas.RenderTransform><TranslateTransform/></Canvas.RenderTransform>
+              <Grid x:Name="EyeL" Width="5.2" Height="5.2" Canvas.Left="3.7" Canvas.Top="3.4" RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
+                <Ellipse Fill="#3A3734"/><Ellipse Width="1.6" Height="1.6" Fill="#F4EFE6" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="2.6,0.9,0,0"/>
+              </Grid>
+              <Grid x:Name="EyeR" Width="5.2" Height="5.2" Canvas.Left="15.1" Canvas.Top="3.4" RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
+                <Ellipse Fill="#3A3734"/><Ellipse Width="1.6" Height="1.6" Fill="#F4EFE6" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="2.6,0.9,0,0"/>
+              </Grid>
+            </Canvas>
           </Grid>
         </Grid>
       </Grid>
@@ -1805,13 +1852,27 @@ $workers = @(
             <StackPanel x:Name="PgNox" Visibility="Collapsed">
               <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                <Border Width="48" Height="48" CornerRadius="14" Background="#0E0E16">
-                  <Grid x:Name="NEyes" Width="30" Height="18">
-                    <Grid.RenderTransform><TranslateTransform/></Grid.RenderTransform>
-                    <Ellipse x:Name="NEyeL" Width="9" Height="17" Fill="#F5F5FA" HorizontalAlignment="Left" Margin="4,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
-                    <Ellipse x:Name="NEyeR" Width="9" Height="17" Fill="#F5F5FA" HorizontalAlignment="Right" Margin="0,0,4,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
-                  </Grid>
-                </Border>
+                <!-- la chouette de Nox (même dessin que dans l'appli) -->
+                <Viewbox Width="48" Height="48">
+                  <Canvas x:Name="NOwl" Width="64" Height="64" RenderTransformOrigin="0.5,0.6">
+                    <Canvas.RenderTransform><RotateTransform/></Canvas.RenderTransform>
+                    <Ellipse Canvas.Left="6" Canvas.Top="8" Width="52" Height="52" Fill="#849C8B"/>
+                    <Path Data="M14,14 L20,22 L12,22 Z M50,14 L44,22 L52,22 Z" Fill="#6F8877"/>
+                    <Border x:Name="NMask" Canvas.Left="11" Canvas.Top="22" Width="42" Height="22" CornerRadius="11" Background="#F4EFE6" BorderBrush="#FF453A" BorderThickness="0"/>
+                    <Canvas x:Name="NPupils" Width="64" Height="64">
+                      <Canvas.RenderTransform><TranslateTransform/></Canvas.RenderTransform>
+                      <Grid x:Name="NEyeL" Width="9" Height="9" Canvas.Left="17.5" Canvas.Top="28.5" RenderTransformOrigin="0.5,0.5">
+                        <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
+                        <Ellipse Fill="#3A3734"/><Ellipse Width="2.8" Height="2.8" Fill="#F4EFE6" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="4.6,1.6,0,0"/>
+                      </Grid>
+                      <Grid x:Name="NEyeR" Width="9" Height="9" Canvas.Left="37.5" Canvas.Top="28.5" RenderTransformOrigin="0.5,0.5">
+                        <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
+                        <Ellipse Fill="#3A3734"/><Ellipse Width="2.8" Height="2.8" Fill="#F4EFE6" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="4.6,1.6,0,0"/>
+                      </Grid>
+                    </Canvas>
+                    <Path Data="M29,40 L35,40 L32,46 Z" Fill="#D46F61"/>
+                  </Canvas>
+                </Viewbox>
                 <StackPanel Grid.Column="1" Margin="14,0,0,0" VerticalAlignment="Center">
                   <StackPanel Orientation="Horizontal">
                     <TextBlock Text="Nox" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="16"/>
