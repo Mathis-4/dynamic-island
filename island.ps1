@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.20'
+$Version = '4.21'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -290,7 +290,7 @@ namespace Island {
     bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
     DispatcherTimer waveTimer; double progressFrac, wavePhase, waveAmp; DateTime lastWave = DateTime.Now;
     DateTime holdUntil = DateTime.MinValue;
-    LinearGradientBrush edgeBrush; GradientStop edgeTop, edgeMid, edgeLow;
+    Path edgePath; LinearGradientBrush edgeBrush; GradientStop edgeTop, edgeMid, edgeLow;
     bool noxUnread, peeking, tilted; string clockShown = ""; string eyeModeShown = ""; string lastSong = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
@@ -348,7 +348,7 @@ namespace Island {
       edgeMid = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.25);
       edgeLow = new GradientStop(Color.FromArgb(0, 255, 255, 255), 1.0);
       edgeBrush.GradientStops.Add(edgeTop); edgeBrush.GradientStops.Add(edgeMid); edgeBrush.GradientStops.Add(edgeLow);
-      shape.Stroke = edgeBrush; shape.StrokeThickness = 1.6;
+      edgePath = E<Path>("Edge"); edgePath.Stroke = edgeBrush;
       earL.Fill = Brushes.Black; earR.Fill = Brushes.Black;
       eyeGlow = new DropShadowEffect { BlurRadius = 8, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
       eyeGlow2 = new DropShadowEffect { BlurRadius = 12, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
@@ -518,6 +518,7 @@ namespace Island {
       double x = Cx - w / 2;
       Geometry g = Fx.Notch(x, w, h, r);
       shape.Data = g;
+      edgePath.Data = Fx.Notch(x + 0.8, w - 1.6, h - 0.8, Math.Max(0, r - 0.8));   // légèrement à l'intérieur : pas coupé par le bord
       clipHost.Clip = g;
       ((TranslateTransform)earL.RenderTransform).X = x - 12;
       ((TranslateTransform)earR.RenderTransform).X = x + w;
@@ -2260,6 +2261,8 @@ $workers = @(
       <!-- pochette qui « voyage » de la pilule réduite vers la vue ouverte -->
       <Border x:Name="Flyer" Visibility="Collapsed" CornerRadius="9" IsHitTestVisible="False"/>
     </Canvas>
+    <!-- liseré coloré, dessiné par-dessus tout le reste -->
+    <Path x:Name="Edge" IsHitTestVisible="False" StrokeThickness="1.6" StrokeLineJoin="Round"/>
   </Canvas>
 </Window>
 
