@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.29'
+$Version = '4.30'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -2040,13 +2040,13 @@ namespace Island {
       if (g.Children.Count > 0) return;
       object[][] tools = {
         new object[] { "\uE924", "Capture", new Action(delegate { Run("ms-screenclip:"); }) },
-        new object[] { "\uE77F", "Presse-papiers", new Action(delegate { Keys(0x5B, 0x56); }) },
+        new object[] { "\uE8EF", "Calculatrice", new Action(delegate { Run("calc.exe"); }) },
         new object[] { "\uE7F4", "Bureau", new Action(delegate { Keys(0x5B, 0x44); }) },
         new object[] { "\uEC50", "Explorateur", new Action(delegate { Run("explorer.exe"); }) },
         new object[] { "\uE74F", "Couper le son", new Action(delegate { Keys(0xAD); }) },
         new object[] { "\uE72E", "Verrouiller", new Action(delegate { LockWorkStation(); }) },
         new object[] { "\uE9D9", "Gestionnaire", new Action(delegate { Run("taskmgr.exe"); }) },
-        new object[] { "\uE713", "Paramètres", new Action(delegate { Run("ms-settings:"); }) } };
+        new object[] { "\uE896", "Téléchargements", new Action(delegate { Run(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")); }) } };
       foreach (object[] t in tools) {
         Action act = (Action)t[2];
         StackPanel sp = new StackPanel(); sp.HorizontalAlignment = HorizontalAlignment.Center;
