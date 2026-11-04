@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.1'
+$Version = '4.2'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -26,13 +26,16 @@ function Log($m) { try { Add-Content -Path $LogPath -Value ("{0:HH:mm:ss} PS  {1
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
 # Une seule instance
-$created = $false
-$script:mutex = New-Object System.Threading.Mutex($true, "Global\MathisDynamicIsland", [ref]$created)
-if (-not $created) { exit }
+# (on attend quelques secondes que l'ancienne se ferme, pour que « Redémarrer » et les mises à jour marchent)
+$script:mutex = New-Object System.Threading.Mutex($false, "Global\MathisDynamicIsland")
+$owned = $false
+try { $owned = $script:mutex.WaitOne(8000) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+if (-not $owned) { Log 'une autre pilule tourne déjà'; exit }
 
 function Restart-Island {
   try { $script:mutex.ReleaseMutex() } catch {}
   Start-Process (Join-Path $env:WINDIR 'System32\conhost.exe') ('--headless powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "' + (Join-Path $Here 'island.ps1') + '"')
+  [Environment]::Exit(0)
 }
 # En cas d'échec au démarrage : retour automatique à la version précédente
 function Fail($what, $err) {
@@ -45,7 +48,8 @@ function Fail($what, $err) {
     $env:ISLAND_ROLLBACK = '1'
     Restart-Island
   }
-  exit
+  try { $script:mutex.ReleaseMutex() } catch {}
+  [Environment]::Exit(1)
 }
 
 $CSharp = @'
@@ -1713,4 +1717,6 @@ Log 'fenêtre fermée'
 # ---------- Fermeture ----------
 $sync.stop = $true
 foreach ($w in $workers) { try { $null = $w.BeginStop($null, $null) } catch {} }
-if ($sync.restart) { Restart-Island } else { try { $script:mutex.ReleaseMutex() } catch {} }
+if ($sync.restart) { Log 'redémarrage'; Restart-Island }
+try { $script:mutex.ReleaseMutex() } catch {}
+[Environment]::Exit(0)   # ferme aussi les fils de fond
