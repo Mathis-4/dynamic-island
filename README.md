@@ -7,7 +7,7 @@ Une pilule façon iPhone en haut de l'écran : heure, batterie, musique en cours
 Dans PowerShell :
 
 ```powershell
-irm https://raw.githubusercontent.com/Mathis-4/dynamic-island/main/install.ps1 | iex
+iex ((irm "https://raw.githubusercontent.com/Mathis-4/dynamic-island/main/install.ps1?t=$(Get-Random)").TrimStart([char]0xFEFF))
 ```
 
 ## Mises à jour

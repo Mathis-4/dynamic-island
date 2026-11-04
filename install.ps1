@@ -1,5 +1,5 @@
 # Installation / réparation de la Dynamic Island de Mathis
-# Usage (PowerShell) : irm https://raw.githubusercontent.com/Mathis-4/dynamic-island/main/install.ps1 | iex
+# Usage (PowerShell) : voir README.md
 $ErrorActionPreference = 'Stop'
 $base = 'https://raw.githubusercontent.com/Mathis-4/dynamic-island/main'
 $d = Join-Path $env:LOCALAPPDATA 'DynamicIsland'
