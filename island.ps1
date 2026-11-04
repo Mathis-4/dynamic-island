@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.22'
+$Version = '4.23'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -95,8 +95,25 @@ namespace Island {
   }
   [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumeratorCom { }
 
+  [ComImport, Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IAudioMeterInformation { int GetPeakValue(out float pfPeak); }
+
   public static class Audio {
     static IMMDeviceEnumerator en;
+    static IAudioMeterInformation meter;
+    // niveau sonore réel (0 à 1) de la sortie audio, pour que l'égaliseur et la vague suivent la musique
+    public static float Peak() {
+      try {
+        if (meter == null) {
+          if (en == null) en = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
+          IMMDevice dev; en.GetDefaultAudioEndpoint(0, 1, out dev);
+          Guid iid = typeof(IAudioMeterInformation).GUID; object o;
+          dev.Activate(ref iid, 23, IntPtr.Zero, out o);
+          meter = (IAudioMeterInformation)o;
+        }
+        float p; meter.GetPeakValue(out p); return p;
+      } catch { meter = null; return -1f; }
+    }
     static IAudioEndpointVolume vol;
     static IAudioEndpointVolume Vol() {
       if (en == null) en = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
@@ -105,7 +122,7 @@ namespace Island {
       dev.Activate(ref iid, 23, IntPtr.Zero, out o);
       return (IAudioEndpointVolume)o;
     }
-    public static void Reset() { vol = null; }
+    public static void Reset() { vol = null; meter = null; }
     public static float Level() { try { if (vol == null) vol = Vol(); float v; vol.GetMasterVolumeLevelScalar(out v); return v; } catch { vol = null; return -1f; } }
     public static bool Muted() { try { if (vol == null) vol = Vol(); bool m; vol.GetMute(out m); return m; } catch { vol = null; return false; } }
   }
@@ -304,7 +321,7 @@ namespace Island {
     bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
     DispatcherTimer waveTimer; double progressFrac, wavePhase, waveAmp; DateTime lastWave = DateTime.Now;
     DateTime holdUntil = DateTime.MinValue;
-    Path edgePath; LinearGradientBrush edgeBrush; GradientStop edgeTop, edgeMid, edgeLow;
+    Path edgePath; GradientBrush edgeBrush; GradientStop edgeTop, edgeMid, edgeLow;
     bool noxUnread, peeking, tilted; string clockShown = ""; string eyeModeShown = ""; string lastSong = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
@@ -344,6 +361,9 @@ namespace Island {
       E<Border>("EBar").Background = accentBrush;
       E<Path>("EWave").Stroke = accentBrush;
       // barre de lecture en vague (style Apple Music / Android) : redessinée ~45 fois par seconde, seulement quand on la voit
+      meterTimer = new DispatcherTimer(DispatcherPriority.Render, win.Dispatcher);
+      meterTimer.Interval = TimeSpan.FromMilliseconds(40);   // 25 fois par seconde
+      meterTimer.Tick += delegate { Safe("son", MeterTick); };
       waveTimer = new DispatcherTimer(DispatcherPriority.Render, win.Dispatcher);
       waveTimer.Interval = TimeSpan.FromMilliseconds(22);
       waveTimer.Tick += delegate { Safe("vague", DrawWave); };
@@ -356,11 +376,13 @@ namespace Island {
       bg.MappingMode = BrushMappingMode.RelativeToBoundingBox;
       shape.Fill = bg;
       // fin liseré à la couleur de la pochette : invisible en haut (collé à l'écran), présent sur les côtés et le bas
-      edgeBrush = new LinearGradientBrush();
-      edgeBrush.StartPoint = new Point(0.5, 0); edgeBrush.EndPoint = new Point(0.5, 1);
-      edgeTop = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.0);
-      edgeMid = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.25);
-      edgeLow = new GradientStop(Color.FromArgb(0, 255, 255, 255), 1.0);
+      // reflet façon verre poli : lumineux au centre du bas, s'estompe vers les côtés et disparaît en haut
+      RadialGradientBrush rb = new RadialGradientBrush();
+      rb.Center = new Point(0.5, 1); rb.GradientOrigin = new Point(0.5, 1); rb.RadiusX = 0.62; rb.RadiusY = 1.05;
+      edgeBrush = rb;
+      edgeLow = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.0);
+      edgeMid = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.55);
+      edgeTop = new GradientStop(Color.FromArgb(0, 255, 255, 255), 1.0);
       edgeBrush.GradientStops.Add(edgeTop); edgeBrush.GradientStops.Add(edgeMid); edgeBrush.GradientStops.Add(edgeLow);
       edgePath = E<Path>("Edge"); edgePath.Stroke = edgeBrush;
       earL.Fill = Brushes.Black; earR.Fill = Brushes.Black;
@@ -930,10 +952,15 @@ namespace Island {
         tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450);
         // liseré coloré seulement pendant la musique ; plus marqué quand la pilule est ouverte
         bool edge = hasMedia && (playing || name == "Expanded");
-        byte alpha = (byte)(edge ? (name == "Compact" ? 210 : 235) : 0);
+        byte alpha = (byte)(edge ? (name == "Compact" ? 200 : 240) : 0);
         // couleur éclaircie (35 % vers le blanc) pour se détacher de la teinte du fond
-        Color lc = Color.FromRgb((byte)(col.R + (255 - col.R) * 0.35), (byte)(col.G + (255 - col.G) * 0.35), (byte)(col.B + (255 - col.B) * 0.35));
-        AnimColor(edgeMid, GradientStop.ColorProperty, Color.FromArgb((byte)(alpha / 3), lc.R, lc.G, lc.B), 500);
+        Color lc = Color.FromRgb((byte)(col.R + (255 - col.R) * 0.45), (byte)(col.G + (255 - col.G) * 0.45), (byte)(col.B + (255 - col.B) * 0.45));
+        AnimColor(edgeMid, GradientStop.ColorProperty, Color.FromArgb((byte)(alpha * 0.35), lc.R, lc.G, lc.B), 500);
+        // le fond vivant remplace la teinte du bas dans la vue ouverte
+        bool amb = name == "Expanded" && hasMedia && ambReady;
+        Anim(E<UIElement>("Amb"), UIElement.OpacityProperty, amb ? 1 : 0, amb ? 500 : 200, 0, null);
+        if (amb) AnimColor(tintStop, GradientStop.ColorProperty, Colors.Black, 300);
+        SetAmbDrift(amb);
         AnimColor(edgeLow, GradientStop.ColorProperty, Color.FromArgb(alpha, lc.R, lc.G, lc.B), 500);
         AnimColor(edgeTop, GradientStop.ColorProperty, Color.FromArgb(0, lc.R, lc.G, lc.B), 500);
       }
@@ -944,18 +971,59 @@ namespace Island {
     void SetEq(bool on) {
       if (eqOn == on) return;
       eqOn = on;
-      int[] durs = { 330, 450, 380, 520, 360, 470, 400, 540 };
+      if (on) {
+        for (int k = 1; k <= 8; k++) ((ScaleTransform)E<UIElement>("Eq" + k).RenderTransform).BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        lastMeter = DateTime.Now; meterTimer.Start(); return;
+      }
+      meterTimer.Stop();
       string[] names = { "Eq1", "Eq2", "Eq3", "Eq4", "Eq5", "Eq6", "Eq7", "Eq8" };
       for (int i = 0; i < names.Length; i++) {
         ScaleTransform st = (ScaleTransform)E<UIElement>(names[i]).RenderTransform;
-        if (on) {
-          DoubleAnimation a = new DoubleAnimation(0.25, 1.0, TimeSpan.FromMilliseconds(durs[i]));
-          a.AutoReverse = true; a.RepeatBehavior = RepeatBehavior.Forever;
-          a.EasingFunction = new SineEase();
-          Timeline.SetDesiredFrameRate(a, 30);   // économise la batterie et la fluidité du reste
-          st.BeginAnimation(ScaleTransform.ScaleYProperty, a);
-        } else Anim(st, ScaleTransform.ScaleYProperty, 0.3, 200, 0, null);
+        st.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        Anim(st, ScaleTransform.ScaleYProperty, 0.3, 200, 0, null);
       }
+    }
+
+    // ---------------- son réel -> égaliseur et vague ----------------
+    DispatcherTimer meterTimer; DateTime lastMeter = DateTime.Now; double level, meterT;
+    double[] eqLevels = new double[4];
+    void MeterTick() {
+      DateTime now = DateTime.Now;
+      double dt = Math.Min(0.1, (now - lastMeter).TotalSeconds); lastMeter = now; meterT += dt;
+      float p = Audio.Peak();
+      double target = p < 0 ? 0.5 + 0.3 * Math.Sin(meterT * 6) : Math.Min(1, Math.Sqrt(p) * 1.15);   // racine : plus vivant à bas volume
+      level = target > level ? level + (target - level) * Math.Min(1, dt * 22) : level + (target - level) * Math.Min(1, dt * 7);
+      double[] f = { 7.1, 9.3, 5.7, 11.2 }, ph = { 0, 1.7, 3.1, 4.4 }, gain = { 0.85, 1.0, 0.92, 0.75 };
+      for (int i = 0; i < 4; i++) {
+        double wob = 0.75 + 0.25 * Math.Sin(meterT * f[i] + ph[i]);
+        double t = Math.Max(0.18, Math.Min(1, level * gain[i] * wob * 1.25));
+        eqLevels[i] = t;
+        ((ScaleTransform)E<UIElement>("Eq" + (i + 1)).RenderTransform).ScaleY = t;
+      }
+    }
+
+    // ---------------- fond vivant (pochette) ----------------
+    bool ambReady, ambDrifting;
+    void SetAmbArt(ImageSource art) {
+      BitmapSource src = art as BitmapSource;
+      ambReady = false;
+      if (src == null || src.PixelWidth < 2) { E<Image>("AmbImg").Source = null; return; }
+      // pochette réduite à 4 x 4 pixels : une fois agrandie, elle donne un dégradé doux de ses couleurs
+      BitmapSource tiny = new TransformedBitmap(src, new ScaleTransform(4.0 / src.PixelWidth, 4.0 / src.PixelHeight));
+      tiny.Freeze();
+      E<Image>("AmbImg").Source = tiny;
+      ambReady = true; tintKey = "";
+    }
+    void SetAmbDrift(bool on) {
+      if (on == ambDrifting) return;
+      ambDrifting = on;
+      ScaleTransform sc = E<ScaleTransform>("AmbScale"); TranslateTransform mv = E<TranslateTransform>("AmbMove");
+      if (!on) { sc.BeginAnimation(ScaleTransform.ScaleXProperty, null); sc.BeginAnimation(ScaleTransform.ScaleYProperty, null); mv.BeginAnimation(TranslateTransform.XProperty, null); return; }
+      DoubleAnimation a = new DoubleAnimation(1.2, 1.45, TimeSpan.FromSeconds(9)); a.AutoReverse = true; a.RepeatBehavior = RepeatBehavior.Forever; a.EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut };
+      DoubleAnimation m = new DoubleAnimation(-28, 28, TimeSpan.FromSeconds(13)); m.AutoReverse = true; m.RepeatBehavior = RepeatBehavior.Forever; m.EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut };
+      Timeline.SetDesiredFrameRate(a, 20); Timeline.SetDesiredFrameRate(m, 20);   // mouvement lent : 20 images/s suffisent
+      sc.BeginAnimation(ScaleTransform.ScaleXProperty, a); sc.BeginAnimation(ScaleTransform.ScaleYProperty, a.Clone());
+      mv.BeginAnimation(TranslateTransform.XProperty, m);
     }
 
     // ---------------- yeux de Nox ----------------
@@ -1141,6 +1209,7 @@ namespace Island {
         string title = Str(G(md, "title")), artist = Str(G(md, "artist")), app = AppName(Str(G(md, "app")));
         E<TextBlock>("ETitle").Text = title; E<TextBlock>("EArtist").Text = artist; E<TextBlock>("EApp").Text = app;
         SetMarquee(string.IsNullOrEmpty(artist) ? title : title + " · " + artist);
+        Safe("fond", delegate { SetAmbArt(art); });
         if (G(md, "color") is Color) { accent = (Color)G(md, "color"); AnimColor(accentBrush, SolidColorBrush.ColorProperty, accent, 600); }
         bool sameSong = (title + "|" + artist) == lastSong;
         lastSong = title + "|" + artist;
@@ -1195,7 +1264,8 @@ namespace Island {
       DateTime now = DateTime.Now;
       double dt = Math.Min(0.1, (now - lastWave).TotalSeconds); lastWave = now;
       bool playing = Playing();
-      waveAmp += ((playing ? 2.6 : 0) - waveAmp) * Math.Min(1, dt * 6);   // la vague s'aplatit en douceur à la pause
+      double wantAmp = playing ? 1.2 + level * 3.6 : 0;   // la vague respire avec le son
+      waveAmp += (wantAmp - waveAmp) * Math.Min(1, dt * 8);   // la vague s'aplatit en douceur à la pause
       if (playing) wavePhase += dt * 2 * Math.PI * 0.9;
       double px = Math.Round(W0 * progressFrac, 1);
       StreamGeometry g = new StreamGeometry();
@@ -2001,6 +2071,25 @@ $workers = @(
     <!-- le contenu, découpé à la forme de la pilule -->
     <Canvas x:Name="ClipHost" Width="520" Height="320">
 
+      <!-- fond « dégradé vivant » : pochette minuscule agrandie (flou naturel), qui dérive lentement -->
+      <Grid x:Name="Amb" Width="520" Height="320" Opacity="0" IsHitTestVisible="False">
+        <Image x:Name="AmbImg" Stretch="Fill" RenderOptions.BitmapScalingMode="HighQuality" RenderTransformOrigin="0.5,0.5">
+          <Image.RenderTransform>
+            <TransformGroup><ScaleTransform x:Name="AmbScale" ScaleX="1.25" ScaleY="1.25"/><TranslateTransform x:Name="AmbMove"/></TransformGroup>
+          </Image.RenderTransform>
+        </Image>
+        <Rectangle>
+          <Rectangle.Fill>
+            <LinearGradientBrush StartPoint="0.5,0" EndPoint="0.5,1">
+              <GradientStop Color="#F2000000" Offset="0"/>
+              <GradientStop Color="#B8000000" Offset="0.3"/>
+              <GradientStop Color="#8C000000" Offset="0.7"/>
+              <GradientStop Color="#A6000000" Offset="1"/>
+            </LinearGradientBrush>
+          </Rectangle.Fill>
+        </Rectangle>
+      </Grid>
+
       <!-- COMPACT -->
       <Grid x:Name="Compact" Height="34">
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -2276,7 +2365,7 @@ $workers = @(
       <Border x:Name="Flyer" Visibility="Collapsed" CornerRadius="9" IsHitTestVisible="False"/>
     </Canvas>
     <!-- liseré coloré, dessiné par-dessus tout le reste -->
-    <Path x:Name="Edge" IsHitTestVisible="False" StrokeThickness="1.6" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+    <Path x:Name="Edge" IsHitTestVisible="False" StrokeThickness="1" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
   </Canvas>
 </Window>
 
