@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.19'
+$Version = '4.20'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -345,10 +345,10 @@ namespace Island {
       edgeBrush = new LinearGradientBrush();
       edgeBrush.StartPoint = new Point(0.5, 0); edgeBrush.EndPoint = new Point(0.5, 1);
       edgeTop = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.0);
-      edgeMid = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.35);
+      edgeMid = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.25);
       edgeLow = new GradientStop(Color.FromArgb(0, 255, 255, 255), 1.0);
       edgeBrush.GradientStops.Add(edgeTop); edgeBrush.GradientStops.Add(edgeMid); edgeBrush.GradientStops.Add(edgeLow);
-      shape.Stroke = edgeBrush; shape.StrokeThickness = 1.1;
+      shape.Stroke = edgeBrush; shape.StrokeThickness = 1.6;
       earL.Fill = Brushes.Black; earR.Fill = Brushes.Black;
       eyeGlow = new DropShadowEffect { BlurRadius = 8, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
       eyeGlow2 = new DropShadowEffect { BlurRadius = 12, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
@@ -915,11 +915,12 @@ namespace Island {
         tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450);
         // liseré coloré seulement pendant la musique ; plus marqué quand la pilule est ouverte
         bool edge = hasMedia && (playing || name == "Expanded");
-        byte alpha = (byte)(edge ? (name == "Compact" ? 150 : 190) : 0);
-        Color ec = Color.FromArgb(alpha, col.R, col.G, col.B);
-        AnimColor(edgeMid, GradientStop.ColorProperty, Color.FromArgb((byte)(alpha / 4), col.R, col.G, col.B), 500);
-        AnimColor(edgeLow, GradientStop.ColorProperty, ec, 500);
-        AnimColor(edgeTop, GradientStop.ColorProperty, Color.FromArgb(0, col.R, col.G, col.B), 500);
+        byte alpha = (byte)(edge ? (name == "Compact" ? 210 : 235) : 0);
+        // couleur éclaircie (35 % vers le blanc) pour se détacher de la teinte du fond
+        Color lc = Color.FromRgb((byte)(col.R + (255 - col.R) * 0.35), (byte)(col.G + (255 - col.G) * 0.35), (byte)(col.B + (255 - col.B) * 0.35));
+        AnimColor(edgeMid, GradientStop.ColorProperty, Color.FromArgb((byte)(alpha / 3), lc.R, lc.G, lc.B), 500);
+        AnimColor(edgeLow, GradientStop.ColorProperty, Color.FromArgb(alpha, lc.R, lc.G, lc.B), 500);
+        AnimColor(edgeTop, GradientStop.ColorProperty, Color.FromArgb(0, lc.R, lc.G, lc.B), 500);
       }
     }
     string VisKey(string n) { return E<UIElement>(n).Visibility == Visibility.Visible ? "1" : "0"; }
