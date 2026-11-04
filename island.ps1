@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.3'
+$Version = '4.4'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -280,7 +280,7 @@ namespace Island {
     bool expandedOn, mouseIn, typing, hiddenFs, restartPending;
     DateTime toastUntil = DateTime.MinValue, peekUntil = DateTime.MinValue, restartAt = DateTime.MinValue;
     DateTime nextBlink = DateTime.Now.AddSeconds(3), nextLook = DateTime.Now.AddSeconds(5), lastPage = DateTime.MinValue;
-    string targetKey = "", tintKey = "", trackKey = "", marqueeText = null, page = "PgToday", compactKey = "", peekKey = "";
+    string targetKey = "", tintKey = "", trackKey = "", marqueeText = null, page = "PgNox", tabOrder = "", compactKey = "", peekKey = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
     DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
@@ -399,7 +399,7 @@ namespace Island {
       tick = new DispatcherTimer(DispatcherPriority.Background, win.Dispatcher);
       tick.Interval = TimeSpan.FromMilliseconds(100);
       tick.Tick += delegate { Safe("cycle", Tick); };
-      UpdateBattery(); UpdateTimer(); ShowPage("PgToday", 0);
+      UpdateBattery(); UpdateTimer(); ShowPage("PgNox", 0);
       tick.Start();
       Log("interface prête (code compilé)");
     }
@@ -550,8 +550,7 @@ namespace Island {
         if (DateTime.Now < peekUntil && (peekIsConfirm || E<TextBlock>("PApp").Text == "Nox")) { peekUntil = DateTime.MinValue; ShowPage("PgNox", 0); }
         else if (playing) ShowPage("PgMusic", 0);
         else if (timerEnd.HasValue) ShowPage("PgTimer", 0);
-        else if (page == "PgMusic" && !HasMedia()) ShowPage("PgToday", 0);
-        else ShowPage(page, 0);
+        else ShowPage(PageList()[0], 0);   // rien ne joue : Nox d'abord
       }
       Refresh();
     }
@@ -591,8 +590,10 @@ namespace Island {
     // ---------------- pages ----------------
     List<string> PageList() {
       List<string> l = new List<string>();
-      if (HasMedia()) l.Add("PgMusic");
-      l.Add("PgTimer"); l.Add("PgNox"); l.Add("PgToday");
+      // musique en cours : Musique puis Nox ; sinon Nox en premier
+      if (Playing()) { l.Add("PgMusic"); l.Add("PgNox"); }
+      else { l.Add("PgNox"); if (HasMedia()) l.Add("PgMusic"); }
+      l.Add("PgTimer"); l.Add("PgToday");
       return l;
     }
     void GoPage(string p) {
@@ -630,6 +631,15 @@ namespace Island {
       }
       page = name;
       List<string> l = PageList();
+      string order = string.Join(",", l.ToArray());
+      if (order != tabOrder) {   // remet les onglets dans le même ordre que les pages
+        tabOrder = order;
+        Panel tabs = (Panel)E<Button>("TabNox").Parent;
+        foreach (string pg in l) {
+          Button tb = E<Button>(tabNames[Array.IndexOf(pageNames, pg)]);
+          tabs.Children.Remove(tb); tabs.Children.Add(tb);
+        }
+      }
       for (int i = 0; i < tabNames.Length; i++) {
         Button tb = E<Button>(tabNames[i]);
         bool avail = l.Contains(pageNames[i]);
@@ -689,7 +699,8 @@ namespace Island {
       if (expandedOn) {
         name = "Expanded";
         List<string> l = PageList();
-        if (!l.Contains(page)) ShowPage("PgToday", 0);
+        if (!l.Contains(page)) ShowPage(l[0], 0);
+        else if (string.Join(",", l.ToArray()) != tabOrder) ShowPage(page, 0);
         // la vue ne rétrécit pas tant que la souris est dessus (sinon elle se refermerait sous le curseur)
         string ek = page + "|" + VisKey("NConfirm") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
         if (ek != expKey) { expKey = ek; expanded.Height = double.NaN; expNatural = Math.Ceiling(Natural(expanded, 440).Height); }
@@ -708,7 +719,7 @@ namespace Island {
         bool music = playing;
         bool noxBusy = noxState == "busy";
         Vis("CArtBox", music); Vis("CTitleBox", music); Vis("CEq", music);
-        Vis("CRingBox", !music && (timerOn || battPct >= 0)); Vis("CTimer", timerOn && !music); Vis("CClock", !music && !timerOn); Vis("CEyes", !music);
+        Vis("CRingBox", timerOn && !music);   // plus d'anneau de batterie (demande de Mathis) Vis("CTimer", timerOn && !music); Vis("CClock", !music && !timerOn); Vis("CEyes", !music);
         if (timerOn && !music) {
           Path ring = E<Path>("CRing");
           ring.Stroke = Br(timerColor);
