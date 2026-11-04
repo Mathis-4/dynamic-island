@@ -2,7 +2,7 @@
 #  Dynamic Island de Mathis - Windows 11
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '2.4'
+$Version = '3.0'
 
 # ---------- Réglages ----------
 $NoxStatusUrl     = ""         # ex. "https://ton-vps/nox/status" (JSON) ; vide = non connecté
@@ -190,8 +190,8 @@ namespace Island {
     void Apply() {
       double w = Math.Max(20, W.Value), h = Math.Max(20, H.Value);
       double r = Math.Max(0, Math.Min(R.Value, Math.Min(w, h) / 2));
-      pill.Width = w; pill.Height = h; pill.CornerRadius = new CornerRadius(r);
-      content.Clip = new RectangleGeometry(new Rect(0, 0, w, h), r, r);
+      pill.Width = w; pill.Height = h; pill.CornerRadius = new CornerRadius(0, 0, r, r);
+      content.Clip = Fx.Notch(w, h, r);
       if (bubble != null) {
         double b = Math.Max(0, B.Value);
         bubble.Width = b; bubble.Height = b;
@@ -204,6 +204,19 @@ namespace Island {
   }
 
   public static class Fx {
+    // Rectangle collé en haut, arrondi seulement en bas (forme d'encoche)
+    public static Geometry Notch(double w, double h, double r) {
+      StreamGeometry g = new StreamGeometry();
+      using (StreamGeometryContext c = g.Open()) {
+        c.BeginFigure(new Point(0, 0), true, true);
+        c.LineTo(new Point(w, 0), false, false);
+        c.LineTo(new Point(w, h - r), false, false);
+        c.ArcTo(new Point(w - r, h), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
+        c.LineTo(new Point(r, h), false, false);
+        c.ArcTo(new Point(0, h - r), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
+      }
+      g.Freeze(); return g;
+    }
     static double Hue(double r, double g, double b, double max, double min) {
       double d = max - min; if (d <= 0) return 0;
       double h;
@@ -439,7 +452,7 @@ $bgHandle = $bg.BeginInvoke()
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize"
-        Width="640" Height="340" UseLayoutRounding="True">
+        Width="720" Height="300" UseLayoutRounding="True">
   <Window.Resources>
     <Style x:Key="IconBtn" TargetType="Button">
       <Setter Property="Foreground" Value="White"/>
@@ -447,7 +460,7 @@ $bgHandle = $bg.BeginInvoke()
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="b" Background="#00FFFFFF" CornerRadius="22" Padding="{TemplateBinding Padding}" RenderTransformOrigin="0.5,0.5">
+            <Border x:Name="b" Background="#00FFFFFF" CornerRadius="18" Padding="{TemplateBinding Padding}" RenderTransformOrigin="0.5,0.5">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -467,7 +480,7 @@ $bgHandle = $bg.BeginInvoke()
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="b" Background="#1AFFFFFF" CornerRadius="13" Padding="11,5">
+            <Border x:Name="b" Background="#1AFFFFFF" CornerRadius="13" Padding="12,5">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -484,41 +497,56 @@ $bgHandle = $bg.BeginInvoke()
     </Style>
   </Window.Resources>
 
-  <StackPanel x:Name="Row" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,8,0,0">
-    <Border x:Name="Pill" VerticalAlignment="Top" Width="150" Height="36" CornerRadius="18" RenderTransformOrigin="0.5,0">
+  <StackPanel x:Name="Row" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Top">
+    <!-- oreille gauche (raccord arrondi avec le haut de l'écran) -->
+    <Path x:Name="EarL" Width="12" Height="12" VerticalAlignment="Top" Data="M0,0 L12,0 L12,12 A12,12 0 0 0 0,0 Z"/>
+
+    <Border x:Name="Pill" VerticalAlignment="Top" Width="170" Height="34" RenderTransformOrigin="0.5,0">
       <Border.RenderTransform><ScaleTransform x:Name="PillScale"/></Border.RenderTransform>
       <Grid x:Name="Body">
 
         <!-- COMPACT -->
-        <DockPanel x:Name="Compact" Height="36" VerticalAlignment="Top" Margin="7,0,13,0">
-          <Border x:Name="CArtBox" DockPanel.Dock="Left" Width="24" Height="24" CornerRadius="7" Background="#1C1C1E" VerticalAlignment="Center">
-            <Border.OpacityMask><VisualBrush><VisualBrush.Visual><Border Width="24" Height="24" CornerRadius="7" Background="Black"/></VisualBrush.Visual></VisualBrush></Border.OpacityMask>
+        <DockPanel x:Name="Compact" Height="34" VerticalAlignment="Top" Margin="10,0,12,0">
+          <!-- gauche -->
+          <Border x:Name="CArtBox" DockPanel.Dock="Left" Width="22" Height="22" CornerRadius="6" Background="#1C1C1E" VerticalAlignment="Center">
+            <Border.OpacityMask><VisualBrush><VisualBrush.Visual><Border Width="22" Height="22" CornerRadius="6" Background="Black"/></VisualBrush.Visual></VisualBrush></Border.OpacityMask>
             <Image x:Name="CArt" Stretch="UniformToFill"/>
           </Border>
-          <TextBlock x:Name="CTimerIco" DockPanel.Dock="Left" Text="&#xE916;" FontFamily="Segoe Fluent Icons" FontSize="15" Foreground="$TimerColor" VerticalAlignment="Center" Margin="6,0,0,0"/>
-          <TextBlock x:Name="CClock" DockPanel.Dock="Left" Margin="7,0,0,0" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" VerticalAlignment="Center"/>
+          <Grid x:Name="CRingBox" DockPanel.Dock="Left" Width="17" Height="17" VerticalAlignment="Center">
+            <Ellipse Width="17" Height="17" Stroke="#30FFFFFF" StrokeThickness="2.5"/>
+            <Path x:Name="CRing" Width="17" Height="17" StrokeThickness="2.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+          </Grid>
+          <!-- droite -->
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-            <StackPanel x:Name="CEq" Orientation="Horizontal" Height="15" VerticalAlignment="Center" Margin="14,0,0,0">
-              <Rectangle x:Name="Eq1" Width="3" Height="15" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.35"/></Rectangle.RenderTransform></Rectangle>
-              <Rectangle x:Name="Eq2" Width="3" Height="15" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
-              <Rectangle x:Name="Eq3" Width="3" Height="15" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
-              <Rectangle x:Name="Eq4" Width="3" Height="15" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
+            <StackPanel x:Name="CEq" Orientation="Horizontal" Height="14" VerticalAlignment="Center" Margin="10,0,0,0">
+              <Rectangle x:Name="Eq1" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.35"/></Rectangle.RenderTransform></Rectangle>
+              <Rectangle x:Name="Eq2" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
+              <Rectangle x:Name="Eq3" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
+              <Rectangle x:Name="Eq4" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
             </StackPanel>
-            <TextBlock x:Name="CTimer" Margin="14,0,0,0" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" Foreground="$TimerColor" VerticalAlignment="Center"/>
-            <StackPanel x:Name="CBatt" Orientation="Horizontal" Margin="16,0,0,0" VerticalAlignment="Center">
-              <TextBlock x:Name="CBattTxt" FontSize="12" Foreground="#C7C7CC" VerticalAlignment="Center" Margin="0,0,5,0"/>
-              <TextBlock x:Name="CBattIco" FontFamily="Segoe Fluent Icons" FontSize="15" VerticalAlignment="Center"/>
-            </StackPanel>
-            <Ellipse x:Name="CNox" Width="7" Height="7" Margin="9,0,0,0" Fill="#48484A" VerticalAlignment="Center"/>
+            <Grid x:Name="CEyes" Width="24" Height="12" Margin="12,0,0,0" VerticalAlignment="Center">
+              <Grid.RenderTransform><TranslateTransform x:Name="CEyesShift"/></Grid.RenderTransform>
+              <Ellipse x:Name="EyeL" Width="6" Height="11" HorizontalAlignment="Left" Margin="4,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+              <Ellipse x:Name="EyeR" Width="6" Height="11" HorizontalAlignment="Right" Margin="0,0,4,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+            </Grid>
           </StackPanel>
-          <Border/>
+          <!-- centre -->
+          <Grid VerticalAlignment="Center" Margin="9,0,0,0">
+            <TextBlock x:Name="CClock" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="CTimer" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" Foreground="$TimerColor" HorizontalAlignment="Center"/>
+            <Canvas x:Name="CTitleBox" Height="18" Width="150" ClipToBounds="True" HorizontalAlignment="Left">
+              <TextBlock x:Name="CTitle" FontSize="12.5" Foreground="#F2F2F7" Canvas.Top="0">
+                <TextBlock.RenderTransform><TranslateTransform x:Name="CTitleShift"/></TextBlock.RenderTransform>
+              </TextBlock>
+            </Canvas>
+          </Grid>
         </DockPanel>
 
         <!-- TOAST (volume, charge...) -->
-        <DockPanel x:Name="Toast" Height="38" VerticalAlignment="Top" Margin="14,0,16,0" Opacity="0" IsHitTestVisible="False">
-          <TextBlock x:Name="TIco" DockPanel.Dock="Left" FontFamily="Segoe Fluent Icons" FontSize="17" VerticalAlignment="Center" Width="22"/>
+        <DockPanel x:Name="Toast" Height="34" VerticalAlignment="Top" Margin="14,0,16,0" Opacity="0" IsHitTestVisible="False">
+          <TextBlock x:Name="TIco" DockPanel.Dock="Left" FontFamily="Segoe Fluent Icons" FontSize="16" VerticalAlignment="Center" Width="22"/>
           <TextBlock x:Name="TRight" DockPanel.Dock="Right" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="13" VerticalAlignment="Center" Margin="12,0,0,0" MinWidth="26" TextAlignment="Right"/>
-          <Grid VerticalAlignment="Center" Margin="12,0,0,0">
+          <Grid VerticalAlignment="Center" Margin="10,0,0,0">
             <TextBlock x:Name="TText" FontSize="13" TextTrimming="CharacterEllipsis"/>
             <Border x:Name="TBarBg" Height="6" CornerRadius="3" Background="#33FFFFFF" Width="170" HorizontalAlignment="Left">
               <Border x:Name="TBar" Height="6" CornerRadius="3" Background="White" HorizontalAlignment="Left" Width="0"/>
@@ -526,103 +554,141 @@ $bgHandle = $bg.BeginInvoke()
           </Grid>
         </DockPanel>
 
-        <!-- PEEK (nouveau titre, message de Nox, minuteur fini) -->
-        <Grid x:Name="Peek" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="12,12,18,12" Opacity="0" IsHitTestVisible="False">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <Border x:Name="PArtBox" Width="44" Height="44" CornerRadius="11" Background="#1C1C1E">
-            <Border.OpacityMask><VisualBrush><VisualBrush.Visual><Border Width="44" Height="44" CornerRadius="11" Background="Black"/></VisualBrush.Visual></VisualBrush></Border.OpacityMask>
+        <!-- PEEK (notification façon iOS) -->
+        <Grid x:Name="Peek" VerticalAlignment="Top" Width="360" Margin="16,10,16,14" HorizontalAlignment="Left" Opacity="0" IsHitTestVisible="False">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <Border x:Name="PArtBox" Width="40" Height="40" CornerRadius="10" Background="#2C2C2E" VerticalAlignment="Center">
+            <Border.OpacityMask><VisualBrush><VisualBrush.Visual><Border Width="40" Height="40" CornerRadius="10" Background="Black"/></VisualBrush.Visual></VisualBrush></Border.OpacityMask>
             <Grid>
-              <TextBlock x:Name="PIco" FontFamily="Segoe Fluent Icons" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              <TextBlock x:Name="PIco" FontFamily="Segoe Fluent Icons" FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Center"/>
               <Image x:Name="PArt" Stretch="UniformToFill"/>
             </Grid>
           </Border>
-          <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" MaxWidth="280">
-            <TextBlock x:Name="PTitle" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14.5" TextTrimming="CharacterEllipsis"/>
-            <TextBlock x:Name="PSub" FontSize="12.5" Foreground="#A1A1A6" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
+          <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+            <DockPanel>
+              <TextBlock DockPanel.Dock="Right" Text="maintenant" FontSize="11.5" Foreground="#8E8E93"/>
+              <TextBlock x:Name="PApp" FontSize="11.5" Foreground="#8E8E93"/>
+            </DockPanel>
+            <TextBlock x:Name="PTitle" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14.5" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
+            <TextBlock x:Name="PSub" FontSize="12.5" Foreground="#AEAEB2" TextTrimming="CharacterEllipsis"/>
           </StackPanel>
         </Grid>
 
-        <!-- ETENDU (survol) -->
-        <StackPanel x:Name="Expanded" VerticalAlignment="Top" Width="392" Margin="20,18,20,16" HorizontalAlignment="Left" Opacity="0" IsHitTestVisible="False">
+        <!-- ETENDU (survol) : pages qu'on fait défiler à la molette -->
+        <StackPanel x:Name="Expanded" VerticalAlignment="Top" Width="400" Margin="20,12,20,10" HorizontalAlignment="Left" Opacity="0" IsHitTestVisible="False">
+          <Grid x:Name="Pages">
 
-          <Grid x:Name="EMedia">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <Border x:Name="EArtBox" Width="68" Height="68" CornerRadius="15" Background="#1C1C1E">
-              <Border.OpacityMask><VisualBrush><VisualBrush.Visual><Border Width="68" Height="68" CornerRadius="15" Background="Black"/></VisualBrush.Visual></VisualBrush></Border.OpacityMask>
+            <!-- Page Musique -->
+            <StackPanel x:Name="PgMusic">
               <Grid>
-                <TextBlock Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="26" Foreground="#636366" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                <Image x:Name="EArt" Stretch="UniformToFill"/>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <Border Width="58" Height="58" CornerRadius="13" Background="#1C1C1E">
+                  <Border.OpacityMask><VisualBrush><VisualBrush.Visual><Border Width="58" Height="58" CornerRadius="13" Background="Black"/></VisualBrush.Visual></VisualBrush></Border.OpacityMask>
+                  <Grid>
+                    <TextBlock Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="22" Foreground="#636366" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <Image x:Name="EArt" Stretch="UniformToFill"/>
+                  </Grid>
+                </Border>
+                <StackPanel Grid.Column="1" Margin="13,0,8,0" VerticalAlignment="Center">
+                  <TextBlock x:Name="ETitle" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="16" TextTrimming="CharacterEllipsis"/>
+                  <TextBlock x:Name="EArtist" FontSize="13" Foreground="#C7C7CC" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
+                  <TextBlock x:Name="EApp" FontSize="11" Margin="0,3,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Height="16" VerticalAlignment="Top" Margin="0,4,0,0">
+                  <Rectangle x:Name="Eq5" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
+                  <Rectangle x:Name="Eq6" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
+                  <Rectangle x:Name="Eq7" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
+                  <Rectangle x:Name="Eq8" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.3"/></Rectangle.RenderTransform></Rectangle>
+                </StackPanel>
               </Grid>
-            </Border>
-            <StackPanel Grid.Column="1" Margin="14,0,8,0" VerticalAlignment="Center">
-              <TextBlock x:Name="ETitle" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="17" TextTrimming="CharacterEllipsis"/>
-              <TextBlock x:Name="EArtist" FontSize="13.5" Foreground="#C7C7CC" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
-              <TextBlock x:Name="EApp" FontSize="11.5" Margin="0,4,0,0"/>
+              <DockPanel x:Name="EProg" Margin="0,12,0,0">
+                <TextBlock x:Name="EPos" DockPanel.Dock="Left" FontSize="11" Foreground="#AEAEB2" Width="36" VerticalAlignment="Center"/>
+                <TextBlock x:Name="ELeft" DockPanel.Dock="Right" FontSize="11" Foreground="#AEAEB2" Width="40" TextAlignment="Right" VerticalAlignment="Center"/>
+                <Grid x:Name="EBarHit" VerticalAlignment="Center" Height="14" Background="#00000000" Cursor="Hand">
+                  <Border CornerRadius="2" Height="4" Background="#30FFFFFF"/>
+                  <Border x:Name="EBar" CornerRadius="2" Height="4" RenderTransformOrigin="0,0.5">
+                    <Border.RenderTransform><ScaleTransform x:Name="EBarScale" ScaleX="0"/></Border.RenderTransform>
+                  </Border>
+                </Grid>
+              </DockPanel>
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,2,0,0">
+                <Button x:Name="BPrev" Style="{StaticResource IconBtn}" Padding="9" Margin="0,0,16,0"><TextBlock Text="&#xE892;" FontFamily="Segoe Fluent Icons" FontSize="16"/></Button>
+                <Button x:Name="BPlay" Style="{StaticResource IconBtn}" Padding="9"><TextBlock x:Name="BPlayIco" Text="&#xE769;" FontFamily="Segoe Fluent Icons" FontSize="22"/></Button>
+                <Button x:Name="BNext" Style="{StaticResource IconBtn}" Padding="9" Margin="16,0,0,0"><TextBlock Text="&#xE893;" FontFamily="Segoe Fluent Icons" FontSize="16"/></Button>
+              </StackPanel>
             </StackPanel>
-            <StackPanel x:Name="EEq" Grid.Column="2" Orientation="Horizontal" Height="18" VerticalAlignment="Top" Margin="0,4,0,0">
-              <Rectangle x:Name="Eq5" Width="3" Height="18" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
-              <Rectangle x:Name="Eq6" Width="3" Height="18" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
-              <Rectangle x:Name="Eq7" Width="3" Height="18" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
-              <Rectangle x:Name="Eq8" Width="3" Height="18" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.3"/></Rectangle.RenderTransform></Rectangle>
-            </StackPanel>
+
+            <!-- Page Minuteur -->
+            <Grid x:Name="PgTimer" Visibility="Collapsed">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <Grid Width="64" Height="64">
+                <Ellipse Width="64" Height="64" Stroke="#33FF9F0A" StrokeThickness="5"/>
+                <Path x:Name="TRing" Width="64" Height="64" Stroke="$TimerColor" StrokeThickness="5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                <TextBlock x:Name="TRingTxt" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" Foreground="$TimerColor" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Grid>
+              <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
+                <TextBlock x:Name="TLabel" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="16"/>
+                <TextBlock x:Name="TSub" FontSize="12.5" Foreground="#AEAEB2" Margin="0,1,0,8"/>
+                <StackPanel Orientation="Horizontal">
+                  <Button x:Name="BT25" Style="{StaticResource Chip}" Margin="0,0,6,0"><TextBlock Text="Focus 25 min" FontSize="12"/></Button>
+                  <Button x:Name="BT5" Style="{StaticResource Chip}"><TextBlock Text="Pause 5 min" FontSize="12"/></Button>
+                  <Button x:Name="BTStop" Style="{StaticResource Chip}"><TextBlock Text="Arrêter" FontSize="12" Foreground="$TimerColor"/></Button>
+                </StackPanel>
+              </StackPanel>
+            </Grid>
+
+            <!-- Page Nox -->
+            <Grid x:Name="PgNox" Visibility="Collapsed">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <Border Width="64" Height="64" CornerRadius="16" Background="#0E0E14">
+                <Grid x:Name="NEyes" Width="34" Height="20">
+                  <Ellipse x:Name="NEyeL" Width="10" Height="19" HorizontalAlignment="Left" Margin="5,0,0,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+                  <Ellipse x:Name="NEyeR" Width="10" Height="19" HorizontalAlignment="Right" Margin="0,0,5,0" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
+                </Grid>
+              </Border>
+              <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="Nox" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="16"/>
+                  <Ellipse x:Name="NDot" Width="8" Height="8" Margin="8,2,0,0" VerticalAlignment="Center"/>
+                  <TextBlock x:Name="NState" FontSize="12.5" Foreground="#AEAEB2" Margin="6,2,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+                <TextBlock x:Name="NTask" FontSize="13" Foreground="#E5E5EA" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"/>
+                <TextBlock x:Name="NLast" FontSize="12" Foreground="#8E8E93" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+              </StackPanel>
+            </Grid>
+
+            <!-- Page Aujourd'hui -->
+            <Grid x:Name="PgToday" Visibility="Collapsed">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <TextBlock x:Name="EClock" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="40" VerticalAlignment="Center"/>
+              <StackPanel Grid.Column="1" Margin="18,0,0,0" VerticalAlignment="Center">
+                <TextBlock x:Name="EDate" FontSize="14.5" Foreground="#E5E5EA"/>
+                <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                  <TextBlock x:Name="EBattIco" FontFamily="Segoe Fluent Icons" FontSize="15" VerticalAlignment="Center"/>
+                  <TextBlock x:Name="EBattTxt" FontSize="12.5" Foreground="#C7C7CC" Margin="6,0,14,0" VerticalAlignment="Center"/>
+                  <TextBlock x:Name="EVolIco" FontFamily="Segoe Fluent Icons" FontSize="14" VerticalAlignment="Center"/>
+                  <TextBlock x:Name="EVolTxt" FontSize="12.5" Foreground="#C7C7CC" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+              </StackPanel>
+            </Grid>
           </Grid>
 
-          <DockPanel x:Name="EProg" Margin="0,16,0,0">
-            <TextBlock x:Name="EPos" DockPanel.Dock="Left" FontSize="11" Foreground="#A1A1A6" Width="38" VerticalAlignment="Center"/>
-            <TextBlock x:Name="ELeft" DockPanel.Dock="Right" FontSize="11" Foreground="#A1A1A6" Width="38" TextAlignment="Right" VerticalAlignment="Center"/>
-            <Grid x:Name="EBarHit" VerticalAlignment="Center" Height="14" Background="#00000000" Cursor="Hand">
-              <Border CornerRadius="2.5" Height="5" Background="#30FFFFFF"/>
-              <Border x:Name="EBar" CornerRadius="2.5" Height="5" RenderTransformOrigin="0,0.5">
-                <Border.RenderTransform><ScaleTransform x:Name="EBarScale" ScaleX="0"/></Border.RenderTransform>
-              </Border>
-            </Grid>
-          </DockPanel>
-
-          <StackPanel x:Name="ECtrl" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,8,0,0">
-            <Button x:Name="BPrev" Style="{StaticResource IconBtn}" Padding="11" Margin="0,0,18,0"><TextBlock Text="&#xE892;" FontFamily="Segoe Fluent Icons" FontSize="19"/></Button>
-            <Button x:Name="BPlay" Style="{StaticResource IconBtn}" Padding="11"><TextBlock x:Name="BPlayIco" Text="&#xE769;" FontFamily="Segoe Fluent Icons" FontSize="27"/></Button>
-            <Button x:Name="BNext" Style="{StaticResource IconBtn}" Padding="11" Margin="18,0,0,0"><TextBlock Text="&#xE893;" FontFamily="Segoe Fluent Icons" FontSize="19"/></Button>
-          </StackPanel>
-
-          <StackPanel x:Name="EClockBox" Orientation="Horizontal">
-            <TextBlock x:Name="EClock" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="42"/>
-            <StackPanel Margin="16,0,0,0" VerticalAlignment="Center">
-              <TextBlock x:Name="EDate" FontSize="14.5" Foreground="#E5E5EA"/>
-              <TextBlock Text="Rien en lecture" FontSize="12.5" Foreground="#8E8E93" Margin="0,2,0,0"/>
-            </StackPanel>
-          </StackPanel>
-
-          <Border Margin="0,14,0,0" CornerRadius="14" Background="#14FFFFFF" Padding="13,9">
-            <DockPanel>
-              <Ellipse x:Name="ENoxDot" DockPanel.Dock="Left" Width="9" Height="9" Fill="#48484A" VerticalAlignment="Center"/>
-              <TextBlock DockPanel.Dock="Left" Text="Nox" Margin="9,0,9,0" FontFamily="Segoe UI Variable Text Semibold, Segoe UI Semibold" FontSize="13" VerticalAlignment="Center"/>
-              <TextBlock x:Name="ENoxTxt" FontSize="12.5" Foreground="#A1A1A6" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-            </DockPanel>
-          </Border>
-
-          <DockPanel Margin="2,12,0,0" LastChildFill="False">
-            <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
-              <TextBlock x:Name="EBattIco" FontFamily="Segoe Fluent Icons" FontSize="16" VerticalAlignment="Center"/>
-              <TextBlock x:Name="EBattTxt" FontSize="12.5" Foreground="#C7C7CC" Margin="7,0,0,0" VerticalAlignment="Center"/>
-            </StackPanel>
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-              <TextBlock x:Name="ETimerTxt" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="14" Foreground="$TimerColor" VerticalAlignment="Center" Margin="0,0,10,0"/>
-              <Button x:Name="BT25" Style="{StaticResource Chip}" Margin="0,0,6,0"><TextBlock Text="Focus 25 min" FontSize="12"/></Button>
-              <Button x:Name="BT5" Style="{StaticResource Chip}" Margin="0,0,0,0"><TextBlock Text="Pause 5 min" FontSize="12"/></Button>
-              <Button x:Name="BTStop" Style="{StaticResource Chip}"><TextBlock Text="Arrêter" FontSize="12" Foreground="$TimerColor"/></Button>
-            </StackPanel>
-          </DockPanel>
+          <!-- points de pagination -->
+          <StackPanel x:Name="Dots" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0" Height="6"/>
         </StackPanel>
 
       </Grid>
     </Border>
 
-    <!-- Bulle (2e activité, ex. minuteur pendant la musique) -->
-    <Border x:Name="Bubble" Background="#000000" VerticalAlignment="Top" Width="0" Height="0" Visibility="Collapsed">
-      <Grid Width="36" Height="36" HorizontalAlignment="Center" VerticalAlignment="Center">
-        <Ellipse Width="26" Height="26" Stroke="#33FF9F0A" StrokeThickness="3"/>
-        <Path x:Name="Ring" Width="26" Height="26" Stroke="$TimerColor" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-        <TextBlock x:Name="RingTxt" FontSize="10" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" Foreground="$TimerColor" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    <!-- oreille droite -->
+    <Path x:Name="EarR" Width="12" Height="12" VerticalAlignment="Top" Data="M0,0 L12,0 A12,12 0 0 0 0,12 Z"/>
+
+    <!-- Bulle (2e activité : minuteur pendant la musique) -->
+    <Border x:Name="Bubble" Background="#000000" VerticalAlignment="Top" Margin="0,2,0,0" Width="0" Height="0" Visibility="Collapsed">
+      <Grid Width="34" Height="34" HorizontalAlignment="Center" VerticalAlignment="Center">
+        <Ellipse Width="24" Height="24" Stroke="#33FF9F0A" StrokeThickness="3"/>
+        <Path x:Name="Ring" Width="24" Height="24" Stroke="$TimerColor" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+        <TextBlock x:Name="RingTxt" FontSize="9.5" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" Foreground="$TimerColor" HorizontalAlignment="Center" VerticalAlignment="Center"/>
       </Grid>
     </Border>
   </StackPanel>
@@ -631,13 +697,20 @@ $bgHandle = $bg.BeginInvoke()
 
 try { $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml)) }
 catch { Log ("XAML : " + $_.Exception.InnerException.Message + " | " + $_.Exception.Message); exit }
+
 $ui = @{}
-foreach ($n in 'Row','Pill','PillScale','Body','Compact','CArtBox','CArt','CTimerIco','CClock','CEq','Eq1','Eq2','Eq3','Eq4','CTimer','CBatt','CBattTxt','CBattIco','CNox',
-               'Toast','TIco','TRight','TText','TBarBg','TBar','Peek','PArtBox','PIco','PArt','PTitle','PSub',
-               'Expanded','EMedia','EArtBox','EArt','ETitle','EArtist','EApp','EEq','Eq5','Eq6','Eq7','Eq8','EProg','EBarHit','EPos','ELeft','EBar','EBarScale','ECtrl',
-               'BPrev','BPlay','BPlayIco','BNext','EClockBox','EClock','EDate','ENoxDot','ENoxTxt','EBattIco','EBattTxt','ETimerTxt','BT25','BT5','BTStop',
+foreach ($n in 'Row','EarL','EarR','Pill','PillScale','Body',
+               'Compact','CArtBox','CArt','CRingBox','CRing','CEq','Eq1','Eq2','Eq3','Eq4','CEyes','CEyesShift','EyeL','EyeR','CClock','CTimer','CTitleBox','CTitle','CTitleShift',
+               'Toast','TIco','TRight','TText','TBarBg','TBar',
+               'Peek','PArtBox','PIco','PArt','PApp','PTitle','PSub',
+               'Expanded','Pages','PgMusic','PgTimer','PgNox','PgToday','Dots',
+               'EArt','ETitle','EArtist','EApp','Eq5','Eq6','Eq7','Eq8','EProg','EPos','ELeft','EBarHit','EBar','EBarScale','BPrev','BPlay','BPlayIco','BNext',
+               'TRing','TRingTxt','TLabel','TSub','BT25','BT5','BTStop',
+               'NEyes','NEyeL','NEyeR','NDot','NState','NTask','NLast',
+               'EClock','EDate','EBattIco','EBattTxt','EVolIco','EVolTxt',
                'Bubble','Ring','RingTxt') {
   $ui[$n] = $win.FindName($n)
+  if ($null -eq $ui[$n]) { Log "élément introuvable : $n" }
 }
 
 $fr = [Globalization.CultureInfo]::GetCultureInfo('fr-FR')
@@ -648,37 +721,52 @@ $PropWidth   = [System.Windows.FrameworkElement]::WidthProperty
 $PropOpacity = [System.Windows.UIElement]::OpacityProperty
 $PropScaleX  = [System.Windows.Media.ScaleTransform]::ScaleXProperty
 $PropScaleY  = [System.Windows.Media.ScaleTransform]::ScaleYProperty
+$PropTransX  = [System.Windows.Media.TranslateTransform]::XProperty
 $PropBlur    = [System.Windows.Media.Effects.BlurEffect]::RadiusProperty
 $PropColor   = [System.Windows.Media.SolidColorBrush]::ColorProperty
 $PropStop    = [System.Windows.Media.GradientStop]::ColorProperty
 $PropFxColor = [System.Windows.Media.Effects.DropShadowEffect]::ColorProperty
 $PropFxOp    = [System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty
 
-# Pinceaux vivants (animés quand la pochette change)
+# ---------- Pinceaux vivants ----------
 $AccentBrush = NewBrush $DefaultAccent
-$TintStop  = New-Object System.Windows.Media.GradientStop ((ToColor '#000000'), 0)
-$BlackStop = New-Object System.Windows.Media.GradientStop ((ToColor '#000000'), 0.85)
+$EyeGlowFx = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius = 9; ShadowDepth = 0; Opacity = 0.95; Color = (ToColor '#B9B4FF') }
+$EyeGlowFx2 = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius = 14; ShadowDepth = 0; Opacity = 0.95; Color = (ToColor '#B9B4FF') }
+$ui.CEyes.Effect = $EyeGlowFx
+$ui.NEyes.Effect = $EyeGlowFx2
+foreach ($e in 'EyeL','EyeR','NEyeL','NEyeR') { $ui[$e].Fill = NewBrush '#F5F5FA' }
+
+# fond : noir en haut (collé à l'écran), teinte de la pochette en bas
+$TopStop  = New-Object System.Windows.Media.GradientStop ((ToColor '#000000'), 0.0)
+$MidStop  = New-Object System.Windows.Media.GradientStop ((ToColor '#000000'), 0.45)
+$TintStop = New-Object System.Windows.Media.GradientStop ((ToColor '#000000'), 1.0)
 $PillBg = New-Object System.Windows.Media.LinearGradientBrush
-$PillBg.StartPoint = New-Object System.Windows.Point(0, 0)
-$PillBg.EndPoint   = New-Object System.Windows.Point(0.35, 1)
-$PillBg.GradientStops.Add($TintStop); $PillBg.GradientStops.Add($BlackStop)
+$PillBg.StartPoint = New-Object System.Windows.Point(0.5, 0)
+$PillBg.EndPoint   = New-Object System.Windows.Point(0.5, 1)
+$PillBg.GradientStops.Add($TopStop); $PillBg.GradientStops.Add($MidStop); $PillBg.GradientStops.Add($TintStop)
 $ui.Pill.Background = $PillBg
+$ui.EarL.Fill = NewBrush '#000000'; $ui.EarR.Fill = NewBrush '#000000'
 $Glow = New-Object System.Windows.Media.Effects.DropShadowEffect
-$Glow.BlurRadius = 26; $Glow.ShadowDepth = 3; $Glow.Direction = 270; $Glow.Opacity = 0.45; $Glow.Color = ToColor '#000000'
+$Glow.BlurRadius = 24; $Glow.ShadowDepth = 4; $Glow.Direction = 270; $Glow.Opacity = 0.4; $Glow.Color = ToColor '#000000'
 $ui.Pill.Effect = $Glow
-$ui.Bubble.Effect = (New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius = 20; ShadowDepth = 3; Direction = 270; Opacity = 0.4; Color = (ToColor '#000000') })
+$ui.Bubble.Effect = (New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius = 18; ShadowDepth = 3; Direction = 270; Opacity = 0.4; Color = (ToColor '#000000') })
 foreach ($e in 'Eq1','Eq2','Eq3','Eq4','Eq5','Eq6','Eq7','Eq8') { $ui[$e].Fill = $AccentBrush }
 $ui.EBar.Background = $AccentBrush
 $ui.EApp.Foreground = $AccentBrush
 
 $Layers = 'Compact','Toast','Peek','Expanded'
 foreach ($l in $Layers) {
-  $ui[$l].RenderTransformOrigin = New-Object System.Windows.Point(0.5, 0.5)
+  $ui[$l].RenderTransformOrigin = New-Object System.Windows.Point(0.5, 0.3)
   $ui[$l].RenderTransform = New-Object System.Windows.Media.ScaleTransform(1, 1)
   $ui[$l].Effect = New-Object System.Windows.Media.Effects.BlurEffect -Property @{ Radius = 0 }
 }
+$PageNames = 'PgMusic','PgTimer','PgNox','PgToday'
+foreach ($pg in $PageNames) {
+  $ui[$pg].RenderTransform = New-Object System.Windows.Media.TranslateTransform(0, 0)
+  $ui[$pg].Effect = New-Object System.Windows.Media.Effects.BlurEffect -Property @{ Radius = 0 }
+}
 
-$Morph = New-Object Island.Morph($ui.Pill, $ui.Body, $ui.Bubble, 150, 36)
+$Morph = New-Object Island.Morph($ui.Pill, $ui.Body, $ui.Bubble, 170, 34)
 
 # ---------- Etat ----------
 $Isl = @{
@@ -687,20 +775,25 @@ $Isl = @{
   toastUntil = [DateTime]::MinValue; peekUntil = [DateTime]::MinValue
   trackKey = ''; firstTrack = $true; accent = (ToColor $DefaultAccent)
   timerEnd = $null; timerTotal = 1; timerLabel = ''
-  vol = -2; muted = $null; power = $null; lowWarned = $false
-  noxNotifId = $null; noxSeen = $false
+  vol = -2; muted = $null; power = $null; lowWarned = $false; battPct = 100
+  noxNotifId = $null; noxSeen = $false; noxState = 'off'
   tick = 0; eqOn = $false; hidden = $false; tinted = $null; hwnd = [IntPtr]::Zero
+  page = 'PgToday'; pageList = @(); lastWheel = [DateTime]::MinValue; dotsKey = ''
+  nextBlink = (Get-Date).AddSeconds(3); nextLook = (Get-Date).AddSeconds(5)
+  marqueeKey = ''
 }
 
 # ---------- Animations utilitaires ----------
 function Ease($kind) {
-  if ($kind -eq 'back') { $e = New-Object System.Windows.Media.Animation.BackEase; $e.Amplitude = 0.3 }
+  if ($kind -eq 'back') { $e = New-Object System.Windows.Media.Animation.BackEase; $e.Amplitude = 0.25 }
+  elseif ($kind -eq 'quint') { $e = New-Object System.Windows.Media.Animation.QuinticEase }
   else { $e = New-Object System.Windows.Media.Animation.CubicEase }
   $e.EasingMode = 'EaseOut'; return $e
 }
-function AnimD($target, $prop, [double]$to, [int]$ms, [int]$delay = 0, $ease = 'cubic') {
+function AnimD($target, $prop, [double]$to, [int]$ms, [int]$delay = 0, $ease = 'cubic', $from = $null) {
   $a = New-Object System.Windows.Media.Animation.DoubleAnimation
   $a.To = $to
+  if ($null -ne $from) { $a.From = [double]$from }
   $a.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromMilliseconds($ms))
   if ($delay -gt 0) { $a.BeginTime = [TimeSpan]::FromMilliseconds($delay) }
   $a.EasingFunction = Ease $ease
@@ -720,18 +813,17 @@ function Switch-Layer($name) {
   foreach ($l in $Layers) {
     $el = $ui[$l]; $on = ($l -eq $name)
     $el.IsHitTestVisible = $on
+    $sc = $el.RenderTransform
     if ($on) {
-      $el.RenderTransform.BeginAnimation($PropScaleX, $null); $el.RenderTransform.BeginAnimation($PropScaleY, $null)
-      $el.RenderTransform.ScaleX = 0.9; $el.RenderTransform.ScaleY = 0.9
-      AnimD $el $PropOpacity 1 260 70
-      AnimD $el.RenderTransform $PropScaleX 1 420 40 'back'
-      AnimD $el.RenderTransform $PropScaleY 1 420 40 'back'
-      AnimD $el.Effect $PropBlur 0 300 40
+      AnimD $el $PropOpacity 1 170 35 'cubic' 0
+      AnimD $sc $PropScaleX 1 260 0 'quint' 0.92
+      AnimD $sc $PropScaleY 1 260 0 'quint' 0.92
+      AnimD $el.Effect $PropBlur 0 200 0 'cubic' 8
     } else {
-      AnimD $el $PropOpacity 0 120
-      AnimD $el.RenderTransform $PropScaleX 0.94 180
-      AnimD $el.RenderTransform $PropScaleY 0.94 180
-      AnimD $el.Effect $PropBlur 10 140
+      AnimD $el $PropOpacity 0 90
+      AnimD $sc $PropScaleX 0.96 120
+      AnimD $sc $PropScaleY 0.96 120
+      AnimD $el.Effect $PropBlur 8 100
     }
   }
 }
@@ -755,39 +847,86 @@ function Set-Eq([bool]$on) {
       $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
       $a.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
       $st.BeginAnimation($PropScaleY, $a)
-    } else {
-      AnimD $st $PropScaleY 0.3 250
-    }
+    } else { AnimD $st $PropScaleY 0.3 200 }
     $i++
   }
 }
 
 function Set-Accent($color) {
   $Isl.accent = $color
-  AnimC $AccentBrush $PropColor $color 700
-  $Isl.tinted = $null   # force la mise à jour du fond
+  AnimC $AccentBrush $PropColor $color 600
+  $Isl.tinted = $null
+}
+
+# ---------- Yeux de Nox (clignent et regardent autour) ----------
+function Blink {
+  foreach ($e in 'EyeL','EyeR','NEyeL','NEyeR') {
+    $a = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame(1.0, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::Zero))))
+    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame(0.1, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(70)))))
+    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame(1.0, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(170)))))
+    $ui[$e].RenderTransform.BeginAnimation($PropScaleY, $a)
+  }
+}
+function Update-Eyes {
+  $now = Get-Date
+  if ($now -ge $Isl.nextBlink) {
+    Blink
+    $Isl.nextBlink = $now.AddMilliseconds((Get-Random -Minimum 2500 -Maximum 6500))
+    if ((Get-Random -Maximum 5) -eq 0) { $Isl.nextBlink = $now.AddMilliseconds(260) }   # double clignement
+  }
+  if ($now -ge $Isl.nextLook) {
+    $x = @(-2.5, 0, 0, 2.5)[(Get-Random -Maximum 4)]
+    AnimD $ui.CEyesShift $PropTransX $x 260 0 'quint'
+    $Isl.nextLook = $now.AddMilliseconds((Get-Random -Minimum 3000 -Maximum 8000))
+  }
+}
+
+# ---------- Titre qui défile ----------
+function Set-Marquee($text) {
+  if ($text -eq $Isl.marqueeKey) { return }
+  $Isl.marqueeKey = $text
+  $ui.CTitle.Text = $text
+  $ui.CTitleShift.BeginAnimation($PropTransX, $null); $ui.CTitleShift.X = 0
+  $sz = Measure-Layer $ui.CTitle
+  $tw = [math]::Ceiling($sz.Width)
+  $max = 150
+  $ui.CTitleBox.Width = [math]::Min($tw, $max)
+  if ($tw -gt $max) {
+    $dist = $tw - $max
+    $scroll = [math]::Max(1.5, $dist / 28.0)
+    $a = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+    $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    $t1 = 2.2; $t2 = $t1 + $scroll; $t3 = $t2 + 1.8; $t4 = $t3 + 0.45
+    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame(0, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($t1)))))
+    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame((-$dist), [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($t2)))))
+    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame((-$dist), [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($t3)))))
+    $null = $a.KeyFrames.Add((New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame(0, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($t4)))))
+    $ui.CTitleShift.BeginAnimation($PropTransX, $a)
+  }
 }
 
 # ---------- Toast / Peek ----------
-function Show-Toast($icon, $text, $right, $color, [double]$bar = -1, [int]$ms = 1600) {
+function Show-Toast($icon, $text, $right, $color, [double]$bar = -1, [int]$ms = 1500) {
   $ui.TIco.Text = $icon
   $ui.TIco.Foreground = NewBrush $color
   $ui.TRight.Text = $right
   if ($bar -ge 0) {
     $ui.TText.Visibility = 'Collapsed'; $ui.TBarBg.Visibility = 'Visible'
     $ui.TBar.Background = NewBrush $color
-    AnimD $ui.TBar $PropWidth ([math]::Max(0, [math]::Min(1, $bar)) * 170) 180
+    AnimD $ui.TBar $PropWidth ([math]::Max(0, [math]::Min(1, $bar)) * 170) 140
   } else {
     $ui.TText.Visibility = 'Visible'; $ui.TBarBg.Visibility = 'Collapsed'
     $ui.TText.Text = $text
   }
   $Isl.toastUntil = (Get-Date).AddMilliseconds($ms)
 }
-function Show-Peek($art, $icon, $iconColor, $title, $sub, [int]$ms = 3200) {
+function Show-Peek($art, $icon, $iconColor, $iconBg, $app, $title, $sub, [int]$ms = 3200) {
   $ui.PArt.Source = $art
   $ui.PIco.Text = $icon
   $ui.PIco.Foreground = NewBrush $iconColor
-  $ui.PArtBox.Background = if ($art) { NewBrush '#1C1C1E' } else { NewBrush '#2C2C2E' }
+  $ui.PArtBox.Background = NewBrush $iconBg
+  $ui.PApp.Text = $app
   $ui.PTitle.Text = $title
   $ui.PSub.Text = $sub
   $ui.PSub.Visibility = if ($sub) { 'Visible' } else { 'Collapsed' }
@@ -802,17 +941,18 @@ function Batt-Glyph([int]$pct, [bool]$charging) {
 }
 function Update-Battery {
   $ps = [System.Windows.Forms.SystemInformation]::PowerStatus
-  if (($ps.BatteryChargeStatus -band [System.Windows.Forms.BatteryChargeStatus]::NoSystemBattery) -ne 0) { $ui.CBatt.Visibility = 'Collapsed'; return }
+  if (($ps.BatteryChargeStatus -band [System.Windows.Forms.BatteryChargeStatus]::NoSystemBattery) -ne 0) { $ui.CRingBox.Visibility = 'Collapsed'; return }
   $pct = [int][math]::Round($ps.BatteryLifePercent * 100)
+  $Isl.battPct = $pct
   $online = ($ps.PowerLineStatus -eq [System.Windows.Forms.PowerLineStatus]::Online)
   $g = Batt-Glyph $pct $online
-  $ui.CBattIco.Text = $g; $ui.EBattIco.Text = $g
-  $ui.CBattTxt.Text = "$pct%"
-  $col = if ($online) { $ChargeColor } elseif ($pct -le 20) { '#FF453A' } else { '#FFFFFF' }
-  $ui.CBattIco.Foreground = NewBrush $col; $ui.EBattIco.Foreground = NewBrush $col
+  $col = if ($online) { $ChargeColor } elseif ($pct -le 20) { '#FF453A' } else { '#F2F2F7' }
+  $ui.CRing.Stroke = NewBrush $col
+  $ui.CRing.Data = [Island.Fx]::Arc(17, 2.5, ($pct / 100.0))
+  $ui.EBattIco.Text = $g; $ui.EBattIco.Foreground = NewBrush $col
   $ui.EBattTxt.Text = if ($online) { "$pct % · en charge" } else { "$pct %" }
   if ($null -ne $Isl.power -and $Isl.power -ne $online) {
-    if ($online) { Show-Toast $g 'En charge' "$pct%" $ChargeColor -ms 2200 } else { Show-Toast $g 'Sur batterie' "$pct%" '#FFFFFF' -ms 2200 }
+    if ($online) { Show-Toast $g 'En charge' "$pct%" $ChargeColor -ms 2000 } else { Show-Toast $g 'Sur batterie' "$pct%" '#FFFFFF' -ms 2000 }
   }
   $Isl.power = $online
   if (-not $online -and $pct -le 20 -and -not $Isl.lowWarned) { $Isl.lowWarned = $true; Show-Toast $g 'Batterie faible' "$pct%" '#FF453A' -ms 3500 }
@@ -820,23 +960,27 @@ function Update-Battery {
 }
 
 # ---------- Volume ----------
+function Vol-Glyph([int]$pct, [bool]$muted) {
+  if ($muted) { return [string][char]0xE74F }
+  if ($pct -eq 0) { [string][char]0xE992 } elseif ($pct -lt 34) { [string][char]0xE993 } elseif ($pct -lt 67) { [string][char]0xE994 } else { [string][char]0xE995 }
+}
 function Update-Volume {
   $v = [Island.Audio]::Level()
   if ($v -lt 0) { return }
   $m = [Island.Audio]::Muted()
   $changed = ($Isl.vol -ge 0) -and (([math]::Abs($v - $Isl.vol) -gt 0.004) -or ($m -ne $Isl.muted))
   $Isl.vol = $v; $Isl.muted = $m
+  $pct = [int][math]::Round($v * 100)
+  $ico = Vol-Glyph $pct $m
+  $ui.EVolIco.Text = $ico
+  $ui.EVolTxt.Text = if ($m) { 'muet' } else { "$pct %" }
   if ($changed) {
-    $pct = [int][math]::Round($v * 100)
-    if ($m) { Show-Toast ([string][char]0xE74F) '' 'Muet' '#8E8E93' 0 }
-    else {
-      $ico = if ($pct -eq 0) { [char]0xE992 } elseif ($pct -lt 34) { [char]0xE993 } elseif ($pct -lt 67) { [char]0xE994 } else { [char]0xE995 }
-      Show-Toast ([string]$ico) '' "$pct" '#FFFFFF' $v
-    }
+    if ($m) { Show-Toast $ico '' 'Muet' '#8E8E93' 0 }
+    else { Show-Toast $ico '' "$pct" '#FFFFFF' $v }
   }
 }
 
-# ---------- Musique (lecture de la table partagée) ----------
+# ---------- Musique ----------
 function App-Name($id) {
   if (-not $id) { return '' }
   $l = $id.ToLower()
@@ -853,13 +997,14 @@ function Update-Media {
     $ui.CArt.Source = $md.art; $ui.EArt.Source = $md.art
     $ui.ETitle.Text = $md.title; $ui.EArtist.Text = $md.artist
     $ui.EApp.Text = App-Name $md.app
+    $label = if ($md.artist) { "$($md.title) · $($md.artist)" } else { $md.title }
+    Set-Marquee $label
     Set-Accent $md.color
-    if (-not $Isl.firstTrack -and $sync.playing) { Show-Peek $md.art '' '#FFFFFF' $md.title $md.artist 3200 }
+    if (-not $Isl.firstTrack -and $sync.playing) { Show-Peek $md.art '' '#FFFFFF' '#1C1C1E' (App-Name $md.app) $md.title $md.artist 3000 }
     $Isl.firstTrack = $false
   }
   if (-not $md) { $Isl.trackKey = '' }
   $ui.BPlayIco.Text = if ($sync.playing) { [string][char]0xE769 } else { [string][char]0xE768 }
-  # progression
   $tl = $sync.timeline
   if ($md -and $tl -and $tl.end -gt 1) {
     $cur = $tl.pos
@@ -874,35 +1019,43 @@ function Update-Media {
 function Media-Do($what) { $sync.cmds.Enqueue($what) }
 
 # ---------- Nox ----------
-function Set-Nox($state, $text) {
-  $col = switch ($state) { 'online' { '#30D158' } 'busy' { $null } 'down' { '#FF453A' } default { '#48484A' } }
-  if ($state -eq 'busy') { $ui.CNox.Fill = $AccentBrush; $ui.ENoxDot.Fill = $AccentBrush }
-  else { $ui.CNox.Fill = NewBrush $col; $ui.ENoxDot.Fill = NewBrush $col }
-  $ui.ENoxTxt.Text = $text
+function Set-Nox($state, $text, $task) {
+  $Isl.noxState = $state
+  $col = switch ($state) { 'online' { '#30D158' } 'busy' { $DefaultAccent } 'down' { '#FF453A' } default { '#8E8E93' } }
+  $glow = switch ($state) { 'online' { '#9BF0B0' } 'busy' { '#B9B4FF' } 'down' { '#FF8A80' } default { '#B9B4FF' } }
+  $ui.NDot.Fill = NewBrush $col
+  $ui.NState.Text = $text
+  $ui.NTask.Text = $task
+  $ui.NTask.Visibility = if ($task) { 'Visible' } else { 'Collapsed' }
+  $c = ToColor $glow
+  if ("$c" -ne "$($EyeGlowFx.Color)") { AnimC $EyeGlowFx $PropFxColor $c 500; AnimC $EyeGlowFx2 $PropFxColor $c 500 }
 }
 function Update-Nox {
-  if (-not $NoxStatusUrl) { Set-Nox 'off' 'pas encore relié à la pilule'; return }
+  if (-not $NoxStatusUrl) { Set-Nox 'off' 'pas encore relié' 'Bientôt : son statut et ses messages ici.'; return }
   $n = $sync.nox
-  if (-not $n) { Set-Nox 'off' 'connexion…'; return }
-  if (-not $n.ok) { Set-Nox 'down' 'injoignable'; return }
+  if (-not $n) { Set-Nox 'off' 'connexion…' ''; return }
+  if (-not $n.ok) { Set-Nox 'down' 'injoignable' ''; return }
   try {
     $j = $n.json | ConvertFrom-Json
-    if ($j.statut -eq 'occupe' -or $j.statut -eq 'occupé') { Set-Nox 'busy' ("en cours : " + $j.tache) }
-    else { Set-Nox 'online' $(if ($j.tache) { [string]$j.tache } else { 'en ligne' }) }
+    if ($j.statut -eq 'occupe' -or $j.statut -eq 'occupé') { Set-Nox 'busy' 'au travail' ([string]$j.tache) }
+    else { Set-Nox 'online' 'en ligne' ([string]$j.tache) }
     if ($j.notification -and $j.notification.id -and $j.notification.id -ne $Isl.noxNotifId) {
       $first = -not $Isl.noxSeen
       $Isl.noxNotifId = $j.notification.id
-      if (-not $first) { Show-Peek $null ([string][char]0xE8BD) $DefaultAccent 'Nox' ([string]$j.notification.texte) 5000 }
+      $ui.NLast.Text = [string]$j.notification.texte
+      if (-not $first) { Show-Peek $null ([string][char]0xE8BD) '#FFFFFF' $DefaultAccent 'Nox' 'Nox' ([string]$j.notification.texte) 5000 }
     }
     $Isl.noxSeen = $true
-  } catch { Set-Nox 'down' 'réponse illisible' }
+  } catch { Set-Nox 'down' 'réponse illisible' '' }
 }
 
 # ---------- Minuteur ----------
 function Start-Timer([int]$min, $label) { $Isl.timerEnd = (Get-Date).AddMinutes($min); $Isl.timerTotal = $min * 60; $Isl.timerLabel = $label }
 function Update-Timer {
   if (-not $Isl.timerEnd) {
-    $ui.CTimer.Text = ''; $ui.ETimerTxt.Text = ''
+    $ui.CTimer.Text = ''
+    $ui.TRing.Data = $null; $ui.TRingTxt.Text = '25:00'
+    $ui.TLabel.Text = 'Minuteur'; $ui.TSub.Text = 'Prêt quand tu l''es'
     $ui.BTStop.Visibility = 'Collapsed'; $ui.BT25.Visibility = 'Visible'; $ui.BT5.Visibility = 'Visible'
     return
   }
@@ -910,15 +1063,78 @@ function Update-Timer {
   if ($left.TotalSeconds -le 0) {
     $lbl = $Isl.timerLabel; $Isl.timerEnd = $null
     [System.Media.SystemSounds]::Asterisk.Play()
-    Show-Peek $null ([string][char]0xE916) $TimerColor "$lbl terminé" $(if ($lbl -eq 'Focus') { 'Prends une pause de 5 min' } else { 'On reprend ?' }) 6000
+    Show-Peek $null ([string][char]0xE916) '#FFFFFF' $TimerColor 'Minuteur' "$lbl terminé" $(if ($lbl -eq 'Focus') { 'Prends une pause de 5 min' } else { 'On reprend ?' }) 6000
     Update-Timer; return
   }
   $txt = '{0:00}:{1:00}' -f [int][math]::Floor($left.TotalMinutes), $left.Seconds
-  $ui.CTimer.Text = $txt; $ui.ETimerTxt.Text = "$($Isl.timerLabel) · $txt"
+  $frac = $left.TotalSeconds / $Isl.timerTotal
+  $ui.CTimer.Text = $txt
+  $ui.TRingTxt.Text = $txt
+  $ui.TRing.Data = [Island.Fx]::Arc(64, 5, $frac)
+  $ui.TLabel.Text = $Isl.timerLabel
+  $ui.TSub.Text = 'Fin à ' + $Isl.timerEnd.ToString('HH:mm')
   $ui.RingTxt.Text = [string][int][math]::Ceiling($left.TotalMinutes)
-  $ui.Ring.Data = [Island.Fx]::Arc(26, 3, ($left.TotalSeconds / $Isl.timerTotal))
+  $ui.Ring.Data = [Island.Fx]::Arc(24, 3, $frac)
   $ui.BTStop.Visibility = 'Visible'; $ui.BT25.Visibility = 'Collapsed'; $ui.BT5.Visibility = 'Collapsed'
 }
+
+# ---------- Pages de la vue étendue ----------
+function Page-List {
+  $l = @()
+  if ($sync.media) { $l += 'PgMusic' }
+  $l += 'PgTimer', 'PgNox', 'PgToday'
+  return ,$l
+}
+function Update-Dots($list) {
+  $key = ($list -join ',') + '|' + $Isl.page
+  if ($key -eq $Isl.dotsKey) { return }
+  $rebuild = ($ui.Dots.Children.Count -ne $list.Count)
+  $Isl.dotsKey = $key
+  if ($rebuild) {
+    $ui.Dots.Children.Clear()
+    foreach ($p in $list) {
+      $d = New-Object System.Windows.Controls.Border
+      $d.Height = 6; $d.Width = 6; $d.CornerRadius = New-Object System.Windows.CornerRadius 3
+      $d.Margin = New-Object System.Windows.Thickness(3, 0, 3, 0)
+      $d.Background = NewBrush '#55FFFFFF'
+      $null = $ui.Dots.Children.Add($d)
+    }
+  }
+  for ($i = 0; $i -lt $list.Count; $i++) {
+    $d = $ui.Dots.Children[$i]
+    $on = ($list[$i] -eq $Isl.page)
+    AnimD $d $PropWidth $(if ($on) { 18 } else { 6 }) 220 0 'quint'
+    $d.Background = if ($on) { NewBrush '#F2F2F7' } else { NewBrush '#55FFFFFF' }
+  }
+}
+function Show-Page($name, [int]$dir = 0) {
+  foreach ($pg in $PageNames) {
+    $el = $ui[$pg]
+    if ($pg -eq $name) {
+      $el.Visibility = 'Visible'
+      if ($dir -ne 0) {
+        AnimD $el.RenderTransform $PropTransX 0 300 0 'quint' (36 * $dir)
+        AnimD $el $PropOpacity 1 200 0 'cubic' 0
+        AnimD $el.Effect $PropBlur 0 220 0 'cubic' 6
+      }
+    } else { $el.Visibility = 'Collapsed' }
+  }
+  $Isl.page = $name
+}
+function Next-Page([int]$dir) {
+  $list = Page-List
+  $i = [array]::IndexOf($list, $Isl.page)
+  if ($i -lt 0) { $i = 0 }
+  $j = $i + $dir
+  if ($j -lt 0 -or $j -ge $list.Count) {
+    # petit rebond en bout de liste
+    AnimD $ui.Pages.RenderTransform $PropTransX 0 260 0 'quint' (-8 * $dir)
+    return
+  }
+  Show-Page $list[$j] $dir
+  $Isl.target = ''   # recalcul de la taille
+}
+$ui.Pages.RenderTransform = New-Object System.Windows.Media.TranslateTransform(0, 0)
 
 # ---------- Etat -> forme ----------
 function Update-Layout {
@@ -931,46 +1147,57 @@ function Update-Layout {
   $ui.CClock.Text = $now.ToString('HH:mm'); $ui.EClock.Text = $now.ToString('HH:mm')
   $ui.EDate.Text = $fr.TextInfo.ToTitleCase($now.ToString('dddd d MMMM', $fr))
 
-  # survol avec intention (pas d'ouverture si on passe juste la souris)
-  $over = $ui.Pill.IsMouseOver -or $menu.IsOpen
+  # survol avec intention : ouverture rapide, fermeture un peu retardée
+  $over = $ui.Pill.IsMouseOver -or $ui.Pill.ContextMenu.IsOpen
   if ($over) { $Isl.outSince = $null; if (-not $Isl.overSince) { $Isl.overSince = $now } }
   else { $Isl.overSince = $null; if (-not $Isl.outSince) { $Isl.outSince = $now } }
-  if ($Isl.expanded) { if ($Isl.outSince -and ($now - $Isl.outSince).TotalMilliseconds -gt 350) { $Isl.expanded = $false } }
-  else { if ($Isl.overSince -and ($now - $Isl.overSince).TotalMilliseconds -ge 140) { $Isl.expanded = $true } }
+  $wasExpanded = $Isl.expanded
+  if ($Isl.expanded) { if ($Isl.outSince -and ($now - $Isl.outSince).TotalMilliseconds -gt 220) { $Isl.expanded = $false } }
+  else { if ($Isl.overSince -and ($now - $Isl.overSince).TotalMilliseconds -ge 90) { $Isl.expanded = $true } }
+  if ($Isl.expanded -and -not $wasExpanded) {
+    # page d'ouverture : la musique si elle joue, sinon le minuteur s'il tourne, sinon la dernière vue
+    if ($playing) { Show-Page 'PgMusic' } elseif ($timerOn) { Show-Page 'PgTimer' }
+    elseif ($Isl.page -eq 'PgMusic' -and -not $hasMedia) { Show-Page 'PgToday' } else { Show-Page $Isl.page }
+  }
 
   $bubble = 0
   if ($Isl.expanded) {
     $layer = 'Expanded'
-    $ui.EMedia.Visibility = if ($hasMedia) { 'Visible' } else { 'Collapsed' }
-    $ui.ECtrl.Visibility  = if ($hasMedia) { 'Visible' } else { 'Collapsed' }
-    if (-not $hasMedia) { $ui.EProg.Visibility = 'Collapsed' }
-    $ui.EClockBox.Visibility = if ($hasMedia) { 'Collapsed' } else { 'Visible' }
+    $list = Page-List
+    if ($list -notcontains $Isl.page) { Show-Page 'PgToday' }
+    Update-Dots $list
     $sz = Measure-Layer $ui.Expanded
-    $w = 432; $h = [math]::Ceiling($sz.Height); $r = 34; $resp = 0.5; $damp = 0.74
+    $w = 440; $h = [math]::Ceiling($sz.Height); $r = 28; $resp = 0.34; $damp = 0.78
   } elseif ($now -lt $Isl.toastUntil) {
-    $layer = 'Toast'; $w = 300; $h = 38; $r = 19; $resp = 0.42; $damp = 0.72
+    $layer = 'Toast'; $w = 300; $h = 34; $r = 16; $resp = 0.3; $damp = 0.8
   } elseif ($now -lt $Isl.peekUntil) {
     $layer = 'Peek'
     $sz = Measure-Layer $ui.Peek
-    $w = [math]::Max(260, [math]::Ceiling($sz.Width)); $h = [math]::Ceiling($sz.Height); $r = 26; $resp = 0.48; $damp = 0.72
+    $w = [math]::Ceiling($sz.Width); $h = [math]::Ceiling($sz.Height); $r = 24; $resp = 0.34; $damp = 0.78
   } else {
     $layer = 'Compact'
-    $musicMode = $playing
-    $ui.CArtBox.Visibility   = if ($musicMode) { 'Visible' } else { 'Collapsed' }
-    $ui.CEq.Visibility       = if ($musicMode) { 'Visible' } else { 'Collapsed' }
-    $ui.CTimerIco.Visibility = if ($timerOn -and -not $musicMode) { 'Visible' } else { 'Collapsed' }
-    $ui.CTimer.Visibility    = if ($timerOn -and -not $musicMode) { 'Visible' } else { 'Collapsed' }
-    $ui.CClock.Visibility    = if ($musicMode -or $timerOn) { 'Collapsed' } else { 'Visible' }
-    $ui.CBatt.Visibility     = if ($musicMode -or $timerOn) { 'Collapsed' } else { 'Visible' }
-    $ui.CNox.Visibility      = if ($musicMode) { 'Collapsed' } else { 'Visible' }
+    $music = $playing
+    $ui.CArtBox.Visibility   = if ($music) { 'Visible' } else { 'Collapsed' }
+    $ui.CTitleBox.Visibility = if ($music) { 'Visible' } else { 'Collapsed' }
+    $ui.CEq.Visibility       = if ($music) { 'Visible' } else { 'Collapsed' }
+    $ui.CRingBox.Visibility  = if ($music) { 'Collapsed' } else { 'Visible' }
+    $ui.CTimer.Visibility    = if ($timerOn -and -not $music) { 'Visible' } else { 'Collapsed' }
+    $ui.CClock.Visibility    = if ($music -or $timerOn) { 'Collapsed' } else { 'Visible' }
+    $ui.CEyes.Visibility     = if ($music) { 'Collapsed' } else { 'Visible' }
+    # en minuteur seul, l'anneau de gauche montre le minuteur
+    if ($timerOn -and -not $music) {
+      $ui.CRing.Stroke = NewBrush $TimerColor
+      $ui.CRing.Data = [Island.Fx]::Arc(17, 2.5, (($Isl.timerEnd - $now).TotalSeconds / $Isl.timerTotal))
+      $Isl.ringIsTimer = $true
+    } elseif ($Isl.ringIsTimer) { $Isl.ringIsTimer = $false; Update-Battery }
     $sz = Measure-Layer $ui.Compact
-    $w = [math]::Max(120, [math]::Ceiling($sz.Width)); $h = 36; $r = 18
-    if ($musicMode) { $w = [math]::Max($w, 200) }
-    $resp = 0.42; $damp = 0.82
-    if ($musicMode -and $timerOn) { $bubble = 36 }
+    $w = [math]::Max(150, [math]::Ceiling($sz.Width)); $h = 34; $r = 16
+    $resp = 0.3; $damp = 0.86
+    if ($music -and $timerOn) { $bubble = 34 }
   }
 
   Set-Eq $playing
+  if (-not $playing -or $Isl.expanded) { Update-Eyes }
 
   $key = "$layer|$w|$h|$bubble"
   if ($key -ne $Isl.target) {
@@ -980,20 +1207,16 @@ function Update-Layout {
   }
   Switch-Layer $layer
 
-  # teinte façon Apple Music : fond légèrement coloré quand la pilule est ouverte sur un morceau
-  $tint = ($hasMedia -and ($layer -eq 'Expanded' -or ($layer -eq 'Peek' -and $ui.PArt.Source)))
-  $tintKey = "$tint|$($Isl.accent)"
+  # teinte en bas de la pilule : pochette quand ça joue, violet Nox sinon
+  $level = 0.0; $col = ToColor $DefaultAccent
+  if ($hasMedia -and ($playing -or $layer -eq 'Expanded')) { $col = $Isl.accent; $level = if ($layer -eq 'Compact') { 0.42 } else { 0.55 } }
+  elseif ($layer -eq 'Compact' -or $layer -eq 'Expanded') { $level = if ($layer -eq 'Compact') { 0.28 } else { 0.38 } }
+  $tintKey = "$level|$col"
   if ($tintKey -ne $Isl.tinted) {
     $Isl.tinted = $tintKey
-    if ($tint) {
-      AnimC $TintStop $PropStop ([Island.Fx]::Shade($Isl.accent, 0.42)) 500
-      AnimC $Glow $PropFxColor ([Island.Fx]::Shade($Isl.accent, 0.8)) 500
-      AnimD $Glow $PropFxOp 0.55 500
-    } else {
-      AnimC $TintStop $PropStop (ToColor '#000000') 400
-      AnimC $Glow $PropFxColor (ToColor '#000000') 400
-      AnimD $Glow $PropFxOp 0.45 400
-    }
+    AnimC $TintStop $PropStop ([Island.Fx]::Shade($col, $level)) 450
+    if ($layer -eq 'Expanded' -and $hasMedia) { AnimC $Glow $PropFxColor ([Island.Fx]::Shade($col, 0.7)) 450; AnimD $Glow $PropFxOp 0.5 450 }
+    else { AnimC $Glow $PropFxColor (ToColor '#000000') 350; AnimD $Glow $PropFxOp 0.4 350 }
   }
 }
 
@@ -1002,10 +1225,10 @@ $ui.BPlay.Add_Click({ Media-Do 'play' })
 $ui.BNext.Add_Click({ Media-Do 'next' })
 $ui.BPrev.Add_Click({ Media-Do 'prev' })
 $ui.EBarHit.Add_MouseLeftButtonUp({
-  param($sender, $e)
+  param($snd, $ev)
   $tl = $sync.timeline
   if ($tl -and $tl.end -gt 1) {
-    $frac = [math]::Max(0, [math]::Min(1, $e.GetPosition($ui.EBarHit).X / $ui.EBarHit.ActualWidth))
+    $frac = [math]::Max(0, [math]::Min(1, $ev.GetPosition($ui.EBarHit).X / $ui.EBarHit.ActualWidth))
     Media-Do ("seek:" + [int]($frac * $tl.end * 1000))
     $sync.timeline = @{ pos = $frac * $tl.end; end = $tl.end; at = [DateTime]::Now }
   }
@@ -1014,10 +1237,21 @@ $ui.BT25.Add_Click({ Start-Timer 25 'Focus'; Update-Timer })
 $ui.BT5.Add_Click({ Start-Timer 5 'Pause'; Update-Timer })
 $ui.BTStop.Add_Click({ $Isl.timerEnd = $null; Update-Timer })
 
+# molette / pavé tactile : changer de widget
+$ui.Pill.Add_PreviewMouseWheel({
+  param($snd, $ev)
+  if (-not $Isl.expanded) { return }
+  $ev.Handled = $true
+  $now = Get-Date
+  if (($now - $Isl.lastWheel).TotalMilliseconds -lt 320) { return }
+  $Isl.lastWheel = $now
+  if ($ev.Delta -lt 0) { Next-Page 1 } else { Next-Page -1 }
+})
+
 # petit "écrasement" au clic, comme sur iPhone
-$ui.Pill.Add_PreviewMouseLeftButtonDown({ AnimD $ui.PillScale $PropScaleX 0.97 120; AnimD $ui.PillScale $PropScaleY 0.97 120 })
-$ui.Pill.Add_PreviewMouseLeftButtonUp({ AnimD $ui.PillScale $PropScaleX 1 380 0 'back'; AnimD $ui.PillScale $PropScaleY 1 380 0 'back' })
-$ui.Pill.Add_MouseLeave({ AnimD $ui.PillScale $PropScaleX 1 300; AnimD $ui.PillScale $PropScaleY 1 300 })
+$ui.Pill.Add_PreviewMouseLeftButtonDown({ AnimD $ui.PillScale $PropScaleX 0.97 90; AnimD $ui.PillScale $PropScaleY 0.97 90 })
+$ui.Pill.Add_PreviewMouseLeftButtonUp({ AnimD $ui.PillScale $PropScaleX 1 300 0 'back'; AnimD $ui.PillScale $PropScaleY 1 300 0 'back' })
+$ui.Pill.Add_MouseLeave({ AnimD $ui.PillScale $PropScaleX 1 200; AnimD $ui.PillScale $PropScaleY 1 200 })
 
 # menu clic droit
 $menu = New-Object System.Windows.Controls.ContextMenu
@@ -1051,21 +1285,21 @@ function Place-Window {
 Place-Window
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromMilliseconds(100)
+$timer.Interval = [TimeSpan]::FromMilliseconds(80)
 $timer.Add_Tick({
   $Isl.tick++
   $sync.uiBeat = [DateTime]::Now
   Step "cycle $($Isl.tick) volume"
-  if ($Isl.tick % 50 -eq 0) { [Island.Audio]::Reset() }
+  if ($Isl.tick % 60 -eq 0) { [Island.Audio]::Reset() }
   try { Update-Volume } catch { Log ("volume : " + $_.Exception.Message) }
   Step "cycle $($Isl.tick) musique"
   try { Update-Media } catch { Log ("musique : " + $_.Exception.Message) }
-  if ($Isl.tick % 5 -eq 1) {
+  if ($Isl.tick % 6 -eq 1) {
     try { Update-Timer } catch { Log ("minuteur : " + $_.Exception.Message) }
   }
-  if ($Isl.tick % 10 -eq 1) {
+  if ($Isl.tick % 12 -eq 1) {
     Step "cycle $($Isl.tick) batterie/nox/plein écran"
-    try { Update-Battery } catch { Log ("batterie : " + $_.Exception.Message) }
+    try { if (-not $Isl.ringIsTimer) { Update-Battery } } catch { Log ("batterie : " + $_.Exception.Message) }
     try { $wa = [System.Windows.SystemParameters]::WorkArea; if ("$wa" -ne $Isl.wa) { $Isl.wa = "$wa"; Place-Window } } catch {}
     try { Update-Nox } catch { Log ("nox : " + $_.Exception.Message) }
     try {
@@ -1078,11 +1312,11 @@ $timer.Add_Tick({
   }
   if ($sync.updated -and -not $Isl.updShown) {
     $Isl.updShown = $true; $Isl.restartAt = (Get-Date).AddSeconds(4)
-    Show-Peek $null ([string][char]0xE895) $ChargeColor "Mise à jour v$($sync.updated)" 'Redémarrage de la pilule…' 4000
+    Show-Peek $null ([string][char]0xE895) '#FFFFFF' $ChargeColor 'Dynamic Island' "Mise à jour v$($sync.updated)" 'Redémarrage…' 4000
   }
   if ($Isl.restartAt -and (Get-Date) -ge $Isl.restartAt -and -not $Isl.expanded) { $script:restart = $true; $win.Close() }
-  if ($Isl.tick -eq 30 -or $Isl.tick % 3000 -eq 0) {
-    Log ("diag : visible={0} pos={1:N0},{2:N0} fenêtre={3:N0}x{4:N0} pilule={5:N0}x{6:N0} opacité={7} masquée={8} couche={9} compact={10} musique={11}" -f $win.IsVisible, $win.Left, $win.Top, $win.ActualWidth, $win.ActualHeight, $ui.Pill.ActualWidth, $ui.Pill.ActualHeight, $ui.Row.Opacity, $Isl.hidden, $Isl.layer, $ui.Compact.Opacity, ($null -ne $sync.media))
+  if ($Isl.tick -eq 40 -or $Isl.tick % 4000 -eq 0) {
+    Log ("diag : visible={0} pilule={1:N0}x{2:N0} masquée={3} couche={4} page={5} musique={6}" -f $win.IsVisible, $ui.Pill.ActualWidth, $ui.Pill.ActualHeight, $Isl.hidden, $Isl.layer, $Isl.page, ($null -ne $sync.media))
   }
   Step "cycle $($Isl.tick) affichage"
   try { Update-Layout } catch { Log ("affichage : " + $_.Exception.Message + " (ligne " + $_.InvocationInfo.ScriptLineNumber + ")") }
@@ -1091,6 +1325,7 @@ $timer.Add_Tick({
 Step 'init batterie'; Update-Battery
 Step 'init minuteur'; Update-Timer
 Step 'init nox'; Update-Nox
+Show-Page 'PgToday'
 $ui.Expanded.Opacity = 0; $ui.Toast.Opacity = 0; $ui.Peek.Opacity = 0
 $timer.Start()
 Log "démarrée"
