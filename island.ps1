@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.26'
+$Version = '4.27'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -92,6 +92,16 @@ namespace Island {
   [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
   interface IMMDevice {
     int Activate(ref Guid id, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+    int OpenPropertyStore(int access, out IPropertyStore props);
+    int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+  }
+  [StructLayout(LayoutKind.Sequential)] struct PROPERTYKEY { public Guid fmtid; public int pid; }
+  [StructLayout(LayoutKind.Explicit, Size = 24)] struct PROPVARIANT { [FieldOffset(0)] public short vt; [FieldOffset(8)] public IntPtr p; }
+  [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPropertyStore {
+    int GetCount(out int n);
+    int GetAt(int i, out PROPERTYKEY k);
+    int GetValue(ref PROPERTYKEY k, out PROPVARIANT v);
   }
   [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
   interface IMMDeviceEnumerator {
@@ -128,6 +138,25 @@ namespace Island {
       return (IAudioEndpointVolume)o;
     }
     public static void Reset() { vol = null; meter = null; }
+    [DllImport("ole32.dll")] static extern int PropVariantClear(ref PROPVARIANT v);
+    // sortie audio par défaut (identifiant + nom affiché), pour annoncer « Son sur : AirPods »
+    public static string DefaultOutput(out string name) {
+      name = "";
+      try {
+        if (en == null) en = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
+        IMMDevice dev; en.GetDefaultAudioEndpoint(0, 1, out dev);
+        string id; dev.GetId(out id);
+        IPropertyStore ps;
+        if (dev.OpenPropertyStore(0, out ps) == 0 && ps != null) {
+          PROPERTYKEY k = new PROPERTYKEY(); k.fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"); k.pid = 14;
+          PROPVARIANT v;
+          if (ps.GetValue(ref k, out v) == 0) { if (v.vt == 31 && v.p != IntPtr.Zero) name = Marshal.PtrToStringUni(v.p); PropVariantClear(ref v); }
+          Marshal.ReleaseComObject(ps);
+        }
+        Marshal.ReleaseComObject(dev);
+        return id;
+      } catch { return null; }
+    }
     public static float Level() { try { if (vol == null) vol = Vol(); float v; vol.GetMasterVolumeLevelScalar(out v); return v; } catch { vol = null; return -1f; } }
     public static bool Muted() { try { if (vol == null) vol = Vol(); bool m; vol.GetMute(out m); return m; } catch { vol = null; return false; } }
   }
@@ -1176,6 +1205,7 @@ namespace Island {
       Safe("musique", UpdateMedia);
       if (tickN % 5 == 1) Safe("minuteur", UpdateTimer);
       if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
+      if (tickN % 10 == 3) Safe("appareils", WatchDevices);
       if (tickN % 10 == 1) {
         Safe("batterie", delegate { if (!ringIsTimer) UpdateBattery(); });
         Safe("nox", UpdateNox);
@@ -1476,6 +1506,71 @@ namespace Island {
     }
 
     // ---------------- toast / notification ----------------
+    // ---------------- Wi-Fi, Bluetooth, sortie audio, clé USB : annoncés brièvement en haut ----------------
+    string lastOut = null; bool? wifiUp = null; HashSet<string> btKnown = null, drivesKnown = null;
+    void WatchDevices() {
+      // sortie audio par défaut
+      string nm; string id = Audio.DefaultOutput(out nm);
+      if (id != null) {
+        if (lastOut != null && id != lastOut) {
+          Audio.Reset();   // volume et niveau sonore suivent le nouvel appareil
+          string low = nm.ToLowerInvariant();
+          bool casque = low.Contains("casque") || low.Contains("head") || low.Contains("airpods") || low.Contains("buds") || low.Contains("écouteurs");
+          ShowToast(casque ? "\uE7F6" : "\uE767", "Son sur " + ShortName(nm), "", Colors.White, -1, 2600); Refresh();
+        }
+        lastOut = id;
+      }
+      // Wi-Fi
+      bool up = false;
+      foreach (System.Net.NetworkInformation.NetworkInterface ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+        if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 && ni.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up) up = true;
+      if (wifiUp.HasValue && wifiUp.Value != up) {
+        if (up) Task.Run(new Action(delegate {
+          string ssid = WifiName();
+          win.Dispatcher.BeginInvoke(new Action(delegate { ShowToast("\uE701", ssid.Length > 0 ? "Connecté à " + ssid : "Wi-Fi connecté", "", Rgb("#0A84FF"), -1, 2600); Refresh(); }));
+        }));
+        else { ShowToast("\uEB5E", "Wi-Fi déconnecté", "", Rgb("#8E8E93"), -1, 2600); Refresh(); }
+      }
+      wifiUp = up;
+      // Bluetooth (liste lue par PowerShell)
+      IEnumerable bt = G(sync, "bt") as IEnumerable;
+      if (bt != null && !(bt is string)) {
+        HashSet<string> now = new HashSet<string>();
+        foreach (object o in bt) { string s = Str(U(o)); if (s.Length > 0) now.Add(s); }
+        if (btKnown != null) {
+          foreach (string s in now) if (!btKnown.Contains(s)) { ShowToast("\uE702", ShortName(s) + " connecté", "", Rgb("#0A84FF"), -1, 2600); Refresh(); }
+          foreach (string s in btKnown) if (!now.Contains(s)) { ShowToast("\uE702", ShortName(s) + " déconnecté", "", Rgb("#8E8E93"), -1, 2600); Refresh(); }
+        }
+        btKnown = now;
+      }
+      // clés USB et disques amovibles
+      HashSet<string> drives = new HashSet<string>(); Dictionary<string, string> labels = new Dictionary<string, string>();
+      foreach (System.IO.DriveInfo d in System.IO.DriveInfo.GetDrives()) {
+        try { if (d.DriveType == System.IO.DriveType.Removable && d.IsReady) { drives.Add(d.Name); labels[d.Name] = d.VolumeLabel; } } catch { }
+      }
+      if (drivesKnown != null) {
+        foreach (string d in drives) if (!drivesKnown.Contains(d)) { string lb = labels[d]; ShowToast("\uE88E", (lb.Length > 0 ? lb : "Clé USB") + " connectée", d.TrimEnd('\\'), Colors.White, -1, 2600); Refresh(); }
+        foreach (string d in drivesKnown) if (!drives.Contains(d)) { ShowToast("\uE88E", "Clé USB retirée", d.TrimEnd('\\'), Rgb("#8E8E93"), -1, 2200); Refresh(); }
+      }
+      drivesKnown = drives;
+    }
+    static string ShortName(string s) { return s.Length > 26 ? s.Substring(0, 25).TrimEnd() + "…" : s; }
+    static string WifiName() {
+      try {
+        System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo("netsh", "wlan show interfaces");
+        psi.CreateNoWindow = true; psi.UseShellExecute = false; psi.RedirectStandardOutput = true;
+        psi.StandardOutputEncoding = Encoding.GetEncoding(850);
+        using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi)) {
+          string outp = p.StandardOutput.ReadToEnd(); p.WaitForExit(3000);
+          foreach (string line in outp.Split('\n')) {
+            string l = line.Trim();
+            if (l.StartsWith("SSID") && !l.StartsWith("SSID BSSID")) { int i = l.IndexOf(':'); if (i > 0) return l.Substring(i + 1).Trim(); }
+          }
+        }
+      } catch { }
+      return "";
+    }
+
     void ShowToast(string icon, string text, string right, Color color, double bar, int ms) {
       E<TextBlock>("TIco").Text = icon; E<TextBlock>("TIco").Foreground = Br(color);
       E<TextBlock>("TRight").Text = right;
@@ -2087,6 +2182,15 @@ $mediaScript = {
     if ($mgr) { BLog 'connecté au gestionnaire média Windows' } else { BLog 'gestionnaire média introuvable' }
   } catch { BLog ("init : " + $_.Exception.Message); $mgr = $null }
 
+  # Bluetooth : appareils connectés (casques, enceintes, téléphone…), relus toutes les 4 s
+  $btSel = $null; $btNext = [DateTime]::Now.AddSeconds(3)
+  try {
+    $null = [Windows.Devices.Enumeration.DeviceInformation,Windows.Devices.Enumeration,ContentType=WindowsRuntime]
+    $null = [Windows.Devices.Bluetooth.BluetoothDevice,Windows.Devices.Bluetooth,ContentType=WindowsRuntime]
+    $tDevColl = [Windows.Devices.Enumeration.DeviceInformationCollection,Windows.Devices.Enumeration,ContentType=WindowsRuntime]
+    $btSel = [Windows.Devices.Bluetooth.BluetoothDevice]::GetDeviceSelectorFromConnectionStatus([Windows.Devices.Bluetooth.BluetoothConnectionStatus]::Connected)
+  } catch { BLog ("bluetooth (init) : " + $_.Exception.Message) }
+
   $http = New-Object System.Net.Http.HttpClient
   $http.Timeout = [TimeSpan]::FromSeconds(10)
   $http.DefaultRequestHeaders.UserAgent.ParseAdd('MathisDynamicIsland/1.0')
@@ -2200,6 +2304,13 @@ $mediaScript = {
       if ($m -ne $lastErr) { BLog $m; $lastErr = $m }
     }
 
+    if ($btSel -and [DateTime]::Now -ge $btNext) {
+      $btNext = [DateTime]::Now.AddSeconds(4)
+      try {
+        $col = Await ([Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync($btSel)) $tDevColl
+        if ($col) { $sync.bt = @(@($col | ForEach-Object { [string]$_.Name }) | Where-Object { $_ } | Sort-Object -Unique) }
+      } catch { $m = "bluetooth : " + $_.Exception.Message; if ($m -ne $lastErr) { BLog $m; $lastErr = $m } }
+    }
     # Mises à jour automatiques depuis GitHub (15 s après le démarrage puis toutes les 3 h)
     if (-not $sync.updated -and [DateTime]::Now -ge $updNext) {
       $updNext = [DateTime]::Now.AddHours(3)
