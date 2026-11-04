@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.9'
+$Version = '4.10'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -335,6 +335,8 @@ namespace Island {
       eyeGlow = new DropShadowEffect { BlurRadius = 8, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
       eyeGlow2 = new DropShadowEffect { BlurRadius = 12, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
 
+      eyeGlow.Color = Rgb("#F4EFE6"); eyeGlow.BlurRadius = 7; eyeGlow.Opacity = 0.6;
+      E<FrameworkElement>("CEyes").Effect = eyeGlow;
       W = new Spring(160); H = new Spring(34); R = new Spring(16); B = new Spring(0);
       Apply();
 
@@ -831,10 +833,10 @@ namespace Island {
       if (now >= nextLook) {
         Random rnd = new Random();
         // les pupilles bougent dans le masque (lecture de gauche à droite quand il travaille)
-        double[] xs = new[] { -1.4, 0, 0, 1.4 };
-        double x = busy ? (((TranslateTransform)E<UIElement>("CPupils").RenderTransform).X > 0 ? -1.4 : 1.4) : xs[rnd.Next(xs.Length)];
+        double[] xs = new[] { -2, 0, 0, 2 };
+        double x = busy ? (((TranslateTransform)E<UIElement>("CPupils").RenderTransform).X > 0 ? -2 : 2) : xs[rnd.Next(xs.Length)];
         foreach (string e in new[] { "CPupils", "PkPupils", "NPupils" })
-          Anim((TranslateTransform)E<UIElement>(e).RenderTransform, TranslateTransform.XProperty, x * (e == "NPupils" ? 2.4 : 1), 280, 0, Quint());
+          Anim((TranslateTransform)E<UIElement>(e).RenderTransform, TranslateTransform.XProperty, x * (e == "NPupils" ? 1.6 : (e == "PkPupils" ? 0.7 : 1)), 280, 0, Quint());
         nextLook = busy ? now.AddMilliseconds(700) : now.AddMilliseconds(rnd.Next(3000, 8000));
       }
     }
@@ -1066,7 +1068,10 @@ namespace Island {
       E<TextBlock>("NAct").Text = act;
       Vis("NAct", act.Length > 0);
       // masque bordé de rouge en cas d'erreur, estompé quand Nox est introuvable (charte de Nox)
-      foreach (string mk in new[] { "EyeMask", "PkMask", "NMask" }) {
+      // petits yeux de la pilule : crème avec une lueur douce, rouges si Nox est injoignable
+      Brush eyeFill = Br(state == "down" ? "#FF6B5E" : "#F4EFE6");
+      E<Ellipse>("CEyeFillL").Fill = eyeFill; E<Ellipse>("CEyeFillR").Fill = eyeFill;
+      foreach (string mk in new[] { "PkMask", "NMask" }) {
         Border mb = E<Border>(mk);
         mb.BorderThickness = new Thickness(state == "down" ? (mk == "NMask" ? 2.5 : 1.2) : 0);
       }
@@ -1718,18 +1723,18 @@ $workers = @(
             <Rectangle x:Name="Eq3" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
             <Rectangle x:Name="Eq4" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
           </StackPanel>
-          <Grid x:Name="CEyes" Width="24" Height="12" Margin="10,0,0,0" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+          <Grid x:Name="CEyes" Width="18" Height="11" Margin="9,0,0,0" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
             <Grid.RenderTransform><RotateTransform/></Grid.RenderTransform>
-            <Border x:Name="EyeMask" CornerRadius="6" Background="#F4EFE6" BorderBrush="#FF453A" BorderThickness="0"/>
-            <Canvas x:Name="CPupils" Width="24" Height="12">
+            <Border x:Name="EyeMask" Background="Transparent" BorderThickness="0"/>
+            <Canvas x:Name="CPupils" Width="18" Height="11">
               <Canvas.RenderTransform><TranslateTransform/></Canvas.RenderTransform>
-              <Grid x:Name="EyeL" Width="5.2" Height="5.2" Canvas.Left="3.7" Canvas.Top="3.4" RenderTransformOrigin="0.5,0.5">
+              <Grid x:Name="EyeL" Width="5" Height="10" Canvas.Left="2.5" Canvas.Top="0.5" RenderTransformOrigin="0.5,0.5">
                 <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
-                <Ellipse Fill="#3A3734"/><Ellipse Width="1.6" Height="1.6" Fill="#F4EFE6" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="2.6,0.9,0,0"/>
+                <Ellipse x:Name="CEyeFillL" Fill="#F4EFE6"/>
               </Grid>
-              <Grid x:Name="EyeR" Width="5.2" Height="5.2" Canvas.Left="15.1" Canvas.Top="3.4" RenderTransformOrigin="0.5,0.5">
+              <Grid x:Name="EyeR" Width="5" Height="10" Canvas.Left="10.5" Canvas.Top="0.5" RenderTransformOrigin="0.5,0.5">
                 <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
-                <Ellipse Fill="#3A3734"/><Ellipse Width="1.6" Height="1.6" Fill="#F4EFE6" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="2.6,0.9,0,0"/>
+                <Ellipse x:Name="CEyeFillR" Fill="#F4EFE6"/>
               </Grid>
             </Canvas>
           </Grid>
