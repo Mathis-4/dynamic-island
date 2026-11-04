@@ -2,7 +2,7 @@
 #  Dynamic Island de Mathis - Windows 11
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '2.1'
+$Version = '2.2'
 
 # ---------- Réglages ----------
 $NoxStatusUrl     = ""         # ex. "https://ton-vps/nox/status" (JSON) ; vide = non connecté
@@ -26,6 +26,8 @@ function Log($m) {
   $script:lastLog = $m
   try { Add-Content -Path $LogPath -Value ("{0:HH:mm:ss} UI  {1}" -f (Get-Date), $m) -Encoding UTF8 } catch {}
 }
+
+function Step($m) { if ($sync) { $sync.step = $m }; if (-not $Isl -or $Isl.tick -le 2) { Log ("étape : " + $m) } }
 
 # Une seule instance
 $created = $false
@@ -88,6 +90,30 @@ namespace Island {
     public static void Reset() { vol = null; }
     public static float Level() { try { if (vol == null) vol = Vol(); float v; vol.GetMasterVolumeLevelScalar(out v); return v; } catch { vol = null; return -1f; } }
     public static bool Muted() { try { if (vol == null) vol = Vol(); bool m; vol.GetMute(out m); return m; } catch { vol = null; return false; } }
+  }
+
+  public static class Img {
+    [DllImport("shcore.dll")]
+    static extern int CreateStreamOverRandomAccessStream([MarshalAs(UnmanagedType.IUnknown)] object ras, ref Guid riid,
+      [MarshalAs(UnmanagedType.Interface)] out System.Runtime.InteropServices.ComTypes.IStream stream);
+    public static byte[] ReadAll(object ras) {
+      Guid iid = new Guid("0000000c-0000-0000-C000-000000000046");
+      System.Runtime.InteropServices.ComTypes.IStream st;
+      int hr = CreateStreamOverRandomAccessStream(ras, ref iid, out st);
+      if (hr != 0) Marshal.ThrowExceptionForHR(hr);
+      System.IO.MemoryStream ms = new System.IO.MemoryStream();
+      byte[] buf = new byte[65536];
+      IntPtr pRead = Marshal.AllocHGlobal(4);
+      try {
+        while (true) {
+          st.Read(buf, buf.Length, pRead);
+          int n = Marshal.ReadInt32(pRead);
+          if (n <= 0) break;
+          ms.Write(buf, 0, n);
+        }
+      } finally { Marshal.FreeHGlobal(pRead); Marshal.ReleaseComObject(st); }
+      return ms.ToArray();
+    }
   }
 
   public static class Win {
@@ -326,12 +352,7 @@ $bgScript = {
                 if ($p.Thumbnail) {
                   $ras = Await ($p.Thumbnail.OpenReadAsync()) $tStream
                   if ($ras) {
-                    $size = [uint32]$ras.Size
-                    $reader = New-Object Windows.Storage.Streams.DataReader ($ras.GetInputStreamAt(0))
-                    $null = Await ($reader.LoadAsync($size)) ([uint32])
-                    $bytes = New-Object byte[] $size
-                    $reader.ReadBytes($bytes)
-                    $reader.Dispose(); $ras.Dispose()
+                    $bytes = [Island.Img]::ReadAll($ras)
                     $ms = New-Object System.IO.MemoryStream (,$bytes)
                     $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
                     $bmp.BeginInit(); $bmp.CacheOption = 'OnLoad'; $bmp.DecodePixelWidth = 160; $bmp.StreamSource = $ms; $bmp.EndInit(); $bmp.Freeze()
@@ -362,6 +383,11 @@ $bgScript = {
         $r = $http.GetStringAsync($noxUrl)
         if ($r.Wait(8000)) { $sync.nox = @{ ok = $true; json = $r.Result } } else { $sync.nox = @{ ok = $false } }
       } catch { $sync.nox = @{ ok = $false } }
+    }
+    if (-not $sync.wdDone -and $sync.uiStart -and ([DateTime]::Now - $sync.uiStart).TotalSeconds -gt 6) {
+      $sync.wdDone = $true
+      if (-not $sync.uiBeat) { BLog "ALERTE : l'interface ne répond pas (aucun cycle depuis 6 s), dernière étape : $($sync.step)" }
+      else { BLog "interface OK (dernier cycle il y a $([int]([DateTime]::Now - $sync.uiBeat).TotalMilliseconds) ms, étape : $($sync.step))" }
     }
     # Mises à jour automatiques depuis GitHub (au démarrage puis toutes les 3 h)
     if ($sync.updateBase -and -not $sync.updated -and [DateTime]::Now -ge $updNext) {
@@ -1002,7 +1028,14 @@ $miQuit.Add_Click({ $win.Close() })
 foreach ($mi in $miVer, $miUpd, (New-Object System.Windows.Controls.Separator), $miLog, $miRestart, $miQuit) { $null = $menu.Items.Add($mi) }
 $ui.Pill.ContextMenu = $menu
 
+$win.Dispatcher.Add_UnhandledException({
+  param($snd, $ev)
+  Log ("EXCEPTION : " + $ev.Exception.ToString())
+  $ev.Handled = $true
+})
+$win.Add_ContentRendered({ Log "fenêtre affichée à l'écran" })
 $win.Add_SourceInitialized({
+  Log "fenêtre créée"
   $Isl.hwnd = (New-Object System.Windows.Interop.WindowInteropHelper $win).Handle
   [Island.Win]::NoActivate($Isl.hwnd)
 })
@@ -1017,13 +1050,17 @@ $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(100)
 $timer.Add_Tick({
   $Isl.tick++
+  $sync.uiBeat = [DateTime]::Now
+  Step "cycle $($Isl.tick) volume"
   if ($Isl.tick % 50 -eq 0) { [Island.Audio]::Reset() }
   try { Update-Volume } catch { Log ("volume : " + $_.Exception.Message) }
+  Step "cycle $($Isl.tick) musique"
   try { Update-Media } catch { Log ("musique : " + $_.Exception.Message) }
   if ($Isl.tick % 5 -eq 1) {
     try { Update-Timer } catch { Log ("minuteur : " + $_.Exception.Message) }
   }
   if ($Isl.tick % 10 -eq 1) {
+    Step "cycle $($Isl.tick) batterie/nox/plein écran"
     try { Update-Battery } catch { Log ("batterie : " + $_.Exception.Message) }
     try { $wa = [System.Windows.SystemParameters]::WorkArea; if ("$wa" -ne $Isl.wa) { $Isl.wa = "$wa"; Place-Window } } catch {}
     try { Update-Nox } catch { Log ("nox : " + $_.Exception.Message) }
@@ -1043,14 +1080,20 @@ $timer.Add_Tick({
   if ($Isl.tick -eq 30 -or $Isl.tick % 3000 -eq 0) {
     Log ("diag : visible={0} pos={1:N0},{2:N0} fenêtre={3:N0}x{4:N0} pilule={5:N0}x{6:N0} opacité={7} masquée={8} couche={9} compact={10} musique={11}" -f $win.IsVisible, $win.Left, $win.Top, $win.ActualWidth, $win.ActualHeight, $ui.Pill.ActualWidth, $ui.Pill.ActualHeight, $ui.Row.Opacity, $Isl.hidden, $Isl.layer, $ui.Compact.Opacity, ($null -ne $sync.media))
   }
+  Step "cycle $($Isl.tick) affichage"
   try { Update-Layout } catch { Log ("affichage : " + $_.Exception.Message + " (ligne " + $_.InvocationInfo.ScriptLineNumber + ")") }
 })
 
-Update-Battery; Update-Timer; Update-Nox
+Step 'init batterie'; Update-Battery
+Step 'init minuteur'; Update-Timer
+Step 'init nox'; Update-Nox
 $ui.Expanded.Opacity = 0; $ui.Toast.Opacity = 0; $ui.Peek.Opacity = 0
 $timer.Start()
 Log "démarrée"
-$null = $win.ShowDialog()
+$sync.uiStart = [DateTime]::Now
+Step 'ouverture de la fenêtre'
+try { $null = $win.ShowDialog() } catch { Log ("ShowDialog : " + $_.Exception.ToString()) }
+Log 'fenêtre fermée'
 
 # ---------- Fermeture ----------
 $timer.Stop()
