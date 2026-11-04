@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.18'
+$Version = '4.19'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -290,6 +290,7 @@ namespace Island {
     bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
     DispatcherTimer waveTimer; double progressFrac, wavePhase, waveAmp; DateTime lastWave = DateTime.Now;
     DateTime holdUntil = DateTime.MinValue;
+    LinearGradientBrush edgeBrush; GradientStop edgeTop, edgeMid, edgeLow;
     bool noxUnread, peeking, tilted; string clockShown = ""; string eyeModeShown = ""; string lastSong = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
@@ -340,6 +341,14 @@ namespace Island {
       bg.GradientStops.Add(tintStop);
       bg.MappingMode = BrushMappingMode.RelativeToBoundingBox;
       shape.Fill = bg;
+      // fin liseré à la couleur de la pochette : invisible en haut (collé à l'écran), présent sur les côtés et le bas
+      edgeBrush = new LinearGradientBrush();
+      edgeBrush.StartPoint = new Point(0.5, 0); edgeBrush.EndPoint = new Point(0.5, 1);
+      edgeTop = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.0);
+      edgeMid = new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.35);
+      edgeLow = new GradientStop(Color.FromArgb(0, 255, 255, 255), 1.0);
+      edgeBrush.GradientStops.Add(edgeTop); edgeBrush.GradientStops.Add(edgeMid); edgeBrush.GradientStops.Add(edgeLow);
+      shape.Stroke = edgeBrush; shape.StrokeThickness = 1.1;
       earL.Fill = Brushes.Black; earR.Fill = Brushes.Black;
       eyeGlow = new DropShadowEffect { BlurRadius = 8, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
       eyeGlow2 = new DropShadowEffect { BlurRadius = 12, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
@@ -712,7 +721,7 @@ namespace Island {
         bool avail = l.Contains(pageNames[i]);
         tb.Visibility = avail ? Visibility.Visible : Visibility.Collapsed;
         bool on = pageNames[i] == name;
-        tb.Background = on ? Br("#26FFFFFF") : Brushes.Transparent;
+        tb.Background = on ? (HasMedia() && Playing() ? Br(Color.FromArgb(0x40, accent.R, accent.G, accent.B)) : Br("#26FFFFFF")) : Brushes.Transparent;
         tb.Foreground = on ? (Brush)Br("#FFFFFF") : Br("#A1A1A6");
       }
     }
@@ -902,7 +911,16 @@ namespace Island {
       if (hasMedia && (playing || name == "Expanded")) { col = accent; level = name == "Compact" ? 0.14 : 0.3; }
       else level = name == "Compact" ? 0.08 : (name == "Expanded" ? 0.18 : 0.08);
       string tk = level + "|" + col;
-      if (tk != tintKey) { tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450); }
+      if (tk != tintKey) {
+        tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450);
+        // liseré coloré seulement pendant la musique ; plus marqué quand la pilule est ouverte
+        bool edge = hasMedia && (playing || name == "Expanded");
+        byte alpha = (byte)(edge ? (name == "Compact" ? 150 : 190) : 0);
+        Color ec = Color.FromArgb(alpha, col.R, col.G, col.B);
+        AnimColor(edgeMid, GradientStop.ColorProperty, Color.FromArgb((byte)(alpha / 4), col.R, col.G, col.B), 500);
+        AnimColor(edgeLow, GradientStop.ColorProperty, ec, 500);
+        AnimColor(edgeTop, GradientStop.ColorProperty, Color.FromArgb(0, col.R, col.G, col.B), 500);
+      }
     }
     string VisKey(string n) { return E<UIElement>(n).Visibility == Visibility.Visible ? "1" : "0"; }
     void Vis(string n, bool on) { E<UIElement>(n).Visibility = on ? Visibility.Visible : Visibility.Collapsed; }
