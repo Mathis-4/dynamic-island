@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.13'
+$Version = '4.14'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -287,6 +287,7 @@ namespace Island {
     HashSet<string> evPeeked = new HashSet<string>();
     static readonly Color EventColor = Color.FromRgb(0x0A, 0x84, 0xFF);
     bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
+    DispatcherTimer waveTimer; double progressFrac, wavePhase, waveAmp; DateTime lastWave = DateTime.Now;
     bool noxUnread, peeking, tilted; string clockShown = ""; string eyeModeShown = ""; string lastSong = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
@@ -324,6 +325,11 @@ namespace Island {
       accentBrush = new SolidColorBrush(accentDefault);
       foreach (string e in new[] { "Eq1", "Eq2", "Eq3", "Eq4", "Eq5", "Eq6", "Eq7", "Eq8" }) E<Shape>(e).Fill = accentBrush;
       E<Border>("EBar").Background = accentBrush;
+      E<Path>("EWave").Stroke = accentBrush;
+      // barre de lecture en vague (style Apple Music / Android) : redessinée ~45 fois par seconde, seulement quand on la voit
+      waveTimer = new DispatcherTimer(DispatcherPriority.Render, win.Dispatcher);
+      waveTimer.Interval = TimeSpan.FromMilliseconds(22);
+      waveTimer.Tick += delegate { Safe("vague", DrawWave); };
       E<TextBlock>("EApp").Foreground = accentBrush;
       LinearGradientBrush bg = new LinearGradientBrush();
       bg.StartPoint = new Point(0.5, 0); bg.EndPoint = new Point(0.5, 1);
@@ -1025,7 +1031,10 @@ namespace Island {
         if (Bool(G(sync, "playing")) && G(tl, "at") is DateTime) cur += (DateTime.Now - (DateTime)G(tl, "at")).TotalSeconds;
         cur = Math.Min(cur, end);
         Vis("EProg", true);
-        E<ScaleTransform>("EBarScale").ScaleX = Math.Max(0, Math.Min(1, cur / end));
+        progressFrac = Math.Max(0, Math.Min(1, cur / end));
+        bool showWave = expandedOn && page == "PgMusic";
+        if (showWave && !waveTimer.IsEnabled) { lastWave = DateTime.Now; waveTimer.Start(); }
+        else if (!showWave && waveTimer.IsEnabled) waveTimer.Stop();
         E<TextBlock>("EPos").Text = Fmt(cur);
         E<TextBlock>("ELeft").Text = "-" + Fmt(end - cur);
       } else Vis("EProg", false);
@@ -1043,6 +1052,37 @@ namespace Island {
       Hashtable n = new Hashtable(); n["pos"] = frac * end; n["end"] = end; n["at"] = DateTime.Now;
       sync["timeline"] = n;
       ev.Handled = true;
+    }
+
+    void DrawWave() {
+      FrameworkElement host = E<FrameworkElement>("EBarHit");
+      double W0 = host.ActualWidth, mid = host.ActualHeight / 2;
+      if (W0 <= 0) return;
+      DateTime now = DateTime.Now;
+      double dt = Math.Min(0.1, (now - lastWave).TotalSeconds); lastWave = now;
+      bool playing = Playing();
+      waveAmp += ((playing ? 2.6 : 0) - waveAmp) * Math.Min(1, dt * 6);   // la vague s'aplatit en douceur à la pause
+      if (playing) wavePhase += dt * 2 * Math.PI * 0.9;
+      double px = Math.Round(W0 * progressFrac, 1);
+      StreamGeometry g = new StreamGeometry();
+      using (StreamGeometryContext ctx = g.Open()) {
+        ctx.BeginFigure(new Point(1.5, mid + waveAmp * Math.Sin(wavePhase)), false, false);
+        for (double x = 3; x <= px; x += 2) {
+          // l'amplitude se réduit près de la tête de lecture pour rejoindre le trait
+          double fade = Math.Min(1, (px - x) / 10.0);
+          ctx.LineTo(new Point(x, mid + waveAmp * fade * Math.Sin(x * 2 * Math.PI / 18.0 - wavePhase)), true, true);
+        }
+      }
+      g.Freeze();
+      E<Path>("EWave").Data = g;
+      StreamGeometry r = new StreamGeometry();
+      using (StreamGeometryContext ctx = r.Open()) {
+        if (px + 6 < W0 - 1.5) { ctx.BeginFigure(new Point(px + 6, mid), false, false); ctx.LineTo(new Point(W0 - 1.5, mid), true, false); }
+      }
+      r.Freeze();
+      E<Path>("ERest").Data = r;
+      E<FrameworkElement>("EKnob").Margin = new Thickness(Math.Max(0, px - 2), 0, 0, 0);
+      if (!expandedOn || page != "PgMusic") waveTimer.Stop();
     }
 
     // ---------------- minuteur ----------------
@@ -1850,9 +1890,12 @@ $workers = @(
               <DockPanel x:Name="EProg" Margin="0,10,0,0">
                 <TextBlock x:Name="EPos" DockPanel.Dock="Left" FontSize="11" Foreground="#AEAEB2" Width="36" VerticalAlignment="Center"/>
                 <TextBlock x:Name="ELeft" DockPanel.Dock="Right" FontSize="11" Foreground="#AEAEB2" Width="40" TextAlignment="Right" VerticalAlignment="Center"/>
-                <Grid x:Name="EBarHit" VerticalAlignment="Center" Height="16" Background="#00000000" Cursor="Hand">
-                  <Border CornerRadius="2" Height="4" Background="#30FFFFFF"/>
-                  <Border x:Name="EBar" CornerRadius="2" Height="4" RenderTransformOrigin="0,0.5">
+                <Grid x:Name="EBarHit" VerticalAlignment="Center" Height="18" Background="#00000000" Cursor="Hand">
+                  <!-- reste du morceau : trait fin ; partie écoutée : vague qui ondule pendant la lecture -->
+                  <Path x:Name="ERest" StrokeThickness="3" Stroke="#30FFFFFF" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                  <Path x:Name="EWave" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                  <Rectangle x:Name="EKnob" Width="4" Height="12" RadiusX="2" RadiusY="2" Fill="White" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                  <Border x:Name="EBar" Visibility="Collapsed" CornerRadius="2" Height="4" RenderTransformOrigin="0,0.5">
                     <Border.RenderTransform><ScaleTransform x:Name="EBarScale" ScaleX="0"/></Border.RenderTransform>
                   </Border>
                 </Grid>
