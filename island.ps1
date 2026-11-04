@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.25'
+$Version = '4.26'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -70,6 +70,11 @@ using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
+using System.Net;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 using Path = System.Windows.Shapes.Path;
 using System.Management.Automation;
 
@@ -291,6 +296,346 @@ namespace Island {
     }
   }
 
+
+  // =================================================================
+  //  Voix : parler à Nox directement depuis la pilule (Gemini Live, comme la page /voix en mode talkie-walkie)
+  //  Le jeton éphémère et les outils passent par l'appli de Nox (Tailscale) ; la clé ne quitte jamais le serveur.
+  // =================================================================
+  [StructLayout(LayoutKind.Sequential, Pack = 2)]
+  struct WAVEFORMATEX { public short wFormatTag, nChannels; public int nSamplesPerSec, nAvgBytesPerSec; public short nBlockAlign, wBitsPerSample, cbSize; }
+  [StructLayout(LayoutKind.Sequential)]
+  struct WAVEHDR { public IntPtr lpData; public int dwBufferLength, dwBytesRecorded; public IntPtr dwUser; public int dwFlags, dwLoops; public IntPtr lpNext, reserved; }
+
+  static class WinMM {
+    [DllImport("winmm.dll")] public static extern int waveInOpen(out IntPtr h, int dev, ref WAVEFORMATEX f, IntPtr cb, IntPtr inst, int flags);
+    [DllImport("winmm.dll")] public static extern int waveInPrepareHeader(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] public static extern int waveInUnprepareHeader(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] public static extern int waveInAddBuffer(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] public static extern int waveInStart(IntPtr h);
+    [DllImport("winmm.dll")] public static extern int waveInReset(IntPtr h);
+    [DllImport("winmm.dll")] public static extern int waveInClose(IntPtr h);
+    [DllImport("winmm.dll")] public static extern int waveOutOpen(out IntPtr h, int dev, ref WAVEFORMATEX f, IntPtr cb, IntPtr inst, int flags);
+    [DllImport("winmm.dll")] public static extern int waveOutPrepareHeader(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] public static extern int waveOutUnprepareHeader(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] public static extern int waveOutWrite(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] public static extern int waveOutReset(IntPtr h);
+    public static WAVEFORMATEX Pcm16(int rate) {
+      WAVEFORMATEX f = new WAVEFORMATEX();
+      f.wFormatTag = 1; f.nChannels = 1; f.nSamplesPerSec = rate; f.wBitsPerSample = 16; f.nBlockAlign = 2; f.nAvgBytesPerSec = rate * 2; f.cbSize = 0;
+      return f;
+    }
+    public static readonly int HdrSize = Marshal.SizeOf(typeof(WAVEHDR));
+    public static readonly int FlagsOffset = (int)Marshal.OffsetOf(typeof(WAVEHDR), "dwFlags");
+    public static readonly int RecordedOffset = (int)Marshal.OffsetOf(typeof(WAVEHDR), "dwBytesRecorded");
+    public static IntPtr NewHeader(int bytes, out IntPtr data) {
+      data = Marshal.AllocHGlobal(bytes);
+      WAVEHDR w = new WAVEHDR(); w.lpData = data; w.dwBufferLength = bytes;
+      IntPtr hdr = Marshal.AllocHGlobal(HdrSize);
+      Marshal.StructureToPtr(w, hdr, false);
+      return hdr;
+    }
+  }
+
+  // Micro : 16 kHz mono, morceaux de 100 ms (lecture des tampons sans rappel, sur un fil à part)
+  class Mic {
+    IntPtr h; IntPtr[] hdrs; IntPtr[] datas; volatile bool run; System.Threading.Thread th; Action<byte[]> cb; int bytes;
+    public Mic(int rate, Action<byte[]> onChunk) {
+      cb = onChunk; bytes = rate / 10 * 2;
+      WAVEFORMATEX f = WinMM.Pcm16(rate);
+      int r = WinMM.waveInOpen(out h, -1, ref f, IntPtr.Zero, IntPtr.Zero, 0);
+      if (r != 0) throw new Exception("micro indisponible (code " + r + ")");
+      hdrs = new IntPtr[6]; datas = new IntPtr[6];
+      for (int i = 0; i < hdrs.Length; i++) {
+        hdrs[i] = WinMM.NewHeader(bytes, out datas[i]);
+        WinMM.waveInPrepareHeader(h, hdrs[i], WinMM.HdrSize);
+        WinMM.waveInAddBuffer(h, hdrs[i], WinMM.HdrSize);
+      }
+      run = true;
+      th = new System.Threading.Thread(Loop); th.IsBackground = true; th.Start();
+      WinMM.waveInStart(h);
+    }
+    void Loop() {
+      int i = 0;
+      while (run) {
+        IntPtr hdr = hdrs[i];
+        int flags = Marshal.ReadInt32(hdr, WinMM.FlagsOffset);
+        if ((flags & 1) != 0) {   // WHDR_DONE
+          int n = Marshal.ReadInt32(hdr, WinMM.RecordedOffset);
+          if (n > 0 && run) {
+            byte[] b = new byte[n]; Marshal.Copy(datas[i], b, 0, n);
+            try { cb(b); } catch { }
+          }
+          if (run) WinMM.waveInAddBuffer(h, hdr, WinMM.HdrSize);
+          i = (i + 1) % hdrs.Length;
+        } else System.Threading.Thread.Sleep(10);
+      }
+    }
+    public void Stop() {
+      if (!run) return;
+      run = false;
+      try { th.Join(500); } catch { }
+      WinMM.waveInReset(h);
+      for (int i = 0; i < hdrs.Length; i++) { WinMM.waveInUnprepareHeader(h, hdrs[i], WinMM.HdrSize); Marshal.FreeHGlobal(datas[i]); Marshal.FreeHGlobal(hdrs[i]); }
+      WinMM.waveInClose(h);
+    }
+  }
+
+  // Haut-parleur : 24 kHz mono, morceaux mis en file
+  class Player {
+    IntPtr h = IntPtr.Zero; readonly object lk = new object();
+    List<IntPtr[]> queued = new List<IntPtr[]>();
+    void Open() {
+      if (h != IntPtr.Zero) return;
+      WAVEFORMATEX f = WinMM.Pcm16(24000);
+      int r = WinMM.waveOutOpen(out h, -1, ref f, IntPtr.Zero, IntPtr.Zero, 0);
+      if (r != 0) { h = IntPtr.Zero; throw new Exception("sortie audio indisponible (code " + r + ")"); }
+    }
+    void Cleanup(bool all) {
+      for (int i = queued.Count - 1; i >= 0; i--) {
+        IntPtr hdr = queued[i][0];
+        if (all || (Marshal.ReadInt32(hdr, WinMM.FlagsOffset) & 1) != 0) {
+          WinMM.waveOutUnprepareHeader(h, hdr, WinMM.HdrSize);
+          Marshal.FreeHGlobal(queued[i][1]); Marshal.FreeHGlobal(hdr);
+          queued.RemoveAt(i);
+        }
+      }
+    }
+    public void Play(byte[] pcm) {
+      if (pcm == null || pcm.Length == 0) return;
+      lock (lk) {
+        Open(); Cleanup(false);
+        IntPtr data; IntPtr hdr = WinMM.NewHeader(pcm.Length, out data);
+        Marshal.Copy(pcm, 0, data, pcm.Length);
+        WinMM.waveOutPrepareHeader(h, hdr, WinMM.HdrSize);
+        WinMM.waveOutWrite(h, hdr, WinMM.HdrSize);
+        queued.Add(new IntPtr[] { hdr, data });
+      }
+    }
+    public bool Busy { get { lock (lk) { if (h == IntPtr.Zero) return false; Cleanup(false); return queued.Count > 0; } } }
+    public void Reset() { lock (lk) { if (h == IntPtr.Zero) return; WinMM.waveOutReset(h); Cleanup(true); } }
+  }
+
+  public class Voice {
+    public Action<string> OnHeard, OnSaid, OnState, OnLog;
+    public Action<string> OnTurnDone;
+    string baseUrl; ClientWebSocket ws; volatile bool ready; bool startSent, endPending, closeAfter;
+    readonly System.Threading.SemaphoreSlim sendLock = new System.Threading.SemaphoreSlim(1, 1);
+    readonly JavaScriptSerializer js = new JavaScriptSerializer();
+    Mic mic; readonly Player player = new Player();
+    readonly List<string> pending = new List<string>(); readonly object pl = new object();
+    volatile bool talking; string heard = "", said = "", heardForTool = ""; string handle;
+    long tokIn, tokOut; public DateTime LastActivity = DateTime.Now; bool connecting;
+    static readonly string[] Urls = {
+      "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained",
+      "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained" };
+
+    public Voice() { js.MaxJsonLength = int.MaxValue; }
+    public bool Open { get { return ws != null; } }
+    public bool Speaking { get { return player.Busy; } }
+    void Log(string m) { if (OnLog != null) OnLog(m); }
+    void State(string s) { if (OnState != null) OnState(s); }
+
+    string Post(string path, object body, int timeoutMs) {
+      HttpWebRequest req = (HttpWebRequest)WebRequest.Create(baseUrl + path);
+      req.Method = "POST"; req.ContentType = "application/json"; req.Headers["X-Jarvis"] = "1"; req.Timeout = timeoutMs;
+      req.UserAgent = "MathisDynamicIsland/1.0";
+      byte[] b = Encoding.UTF8.GetBytes(js.Serialize(body));
+      using (System.IO.Stream s = req.GetRequestStream()) s.Write(b, 0, b.Length);
+      using (WebResponse resp = req.GetResponse())
+      using (System.IO.StreamReader rd = new System.IO.StreamReader(resp.GetResponseStream(), Encoding.UTF8)) return rd.ReadToEnd();
+    }
+
+    void Send(object msg) {
+      ClientWebSocket s = ws;
+      if (s == null || s.State != WebSocketState.Open) return;
+      byte[] b = Encoding.UTF8.GetBytes(msg is string ? (string)msg : js.Serialize(msg));
+      sendLock.Wait();
+      try { s.SendAsync(new ArraySegment<byte>(b), WebSocketMessageType.Text, true, System.Threading.CancellationToken.None).Wait(10000); }
+      catch (Exception ex) { Log("voix (envoi) : " + ex.GetBaseException().Message); }
+      finally { sendLock.Release(); }
+    }
+    static Dictionary<string, object> D(params object[] kv) {
+      Dictionary<string, object> d = new Dictionary<string, object>();
+      for (int i = 0; i + 1 < kv.Length; i += 2) d[(string)kv[i]] = kv[i + 1];
+      return d;
+    }
+
+    // ---- appui / relâchement du bouton micro ----
+    public void PressStart(string url) {
+      baseUrl = url.TrimEnd('/');
+      talking = true; startSent = false; endPending = false; heard = ""; LastActivity = DateTime.Now;
+      player.Reset();   // couper Nox s'il parlait
+      try { if (mic == null) mic = new Mic(16000, OnMicChunk); }
+      catch (Exception ex) { Log("voix : " + ex.Message); State("erreur:" + ex.Message); talking = false; return; }
+      State("ecoute");
+      if (ready) Task.Run(new Action(SendStart));
+      else if (!connecting) Task.Run(new Action(Connect));
+    }
+    public void PressEnd() {
+      if (!talking) return;
+      talking = false; LastActivity = DateTime.Now;
+      Task.Run(new Action(delegate {
+        System.Threading.Thread.Sleep(300);   // le micro vide son tampon
+        Mic m = mic; mic = null;
+        if (m != null) m.Stop();
+        if (ready) { FlushPending(); if (startSent) { Send(D("realtimeInput", D("activityEnd", D()))); startSent = false; } State("reflechit"); }
+        else endPending = true;
+      }));
+    }
+    void SendStart() { if (!startSent) { Send(D("realtimeInput", D("activityStart", D()))); startSent = true; } FlushPending(); }
+    void FlushPending() {
+      List<string> l;
+      lock (pl) { l = new List<string>(pending); pending.Clear(); }
+      if (l.Count > 0 && !startSent) { Send(D("realtimeInput", D("activityStart", D()))); startSent = true; }
+      foreach (string b in l) Send(D("realtimeInput", D("audio", D("mimeType", "audio/pcm;rate=16000", "data", b))));
+    }
+    void OnMicChunk(byte[] pcm) {
+      string b64 = Convert.ToBase64String(pcm);
+      if (ready) {
+        if (!startSent) { Send(D("realtimeInput", D("activityStart", D()))); startSent = true; }
+        FlushPending();
+        Send(D("realtimeInput", D("audio", D("mimeType", "audio/pcm;rate=16000", "data", b64))));
+      } else lock (pl) pending.Add(b64);
+    }
+
+    // ---- connexion ----
+    void Connect() {
+      connecting = true;
+      try {
+        Dictionary<string, object> d = js.DeserializeObject(Post("/api/voix/jeton", D("mode", "talkie"), 20000)) as Dictionary<string, object>;
+        if (d == null || !d.ContainsKey("jeton")) throw new Exception("jeton refusé");
+        string jeton = Convert.ToString(d["jeton"]);
+        Dictionary<string, object> setup = d["setup"] as Dictionary<string, object>;
+        if (handle != null && setup != null && setup.ContainsKey("setup")) ((Dictionary<string, object>)setup["setup"])["sessionResumption"] = D("handle", handle);
+        Exception last = null;
+        foreach (string u in Urls) {
+          ClientWebSocket s = new ClientWebSocket();
+          try {
+            s.ConnectAsync(new Uri(u + "?access_token=" + Uri.EscapeDataString(jeton)), System.Threading.CancellationToken.None).Wait(15000);
+            if (s.State != WebSocketState.Open) throw new Exception("connexion impossible");
+            ws = s; ready = false;
+            Send(setup);
+            Task.Run(new Action(delegate { Receive(s); }));
+            last = null; break;
+          } catch (Exception ex) { last = ex; try { s.Dispose(); } catch { } }
+        }
+        if (last != null) throw last;
+        Log("voix : connecté à Gemini Live");
+      } catch (Exception ex) {
+        Log("voix (connexion) : " + ex.GetBaseException().Message);
+        State("erreur:Nox ne répond pas en vocal");
+        ws = null; ready = false;
+      } finally { connecting = false; }
+    }
+
+    void Receive(ClientWebSocket s) {
+      byte[] buf = new byte[65536];
+      System.IO.MemoryStream acc = new System.IO.MemoryStream();
+      try {
+        while (s.State == WebSocketState.Open) {
+          Task<WebSocketReceiveResult> t = s.ReceiveAsync(new ArraySegment<byte>(buf), System.Threading.CancellationToken.None);
+          t.Wait();
+          WebSocketReceiveResult r = t.Result;
+          if (r.MessageType == WebSocketMessageType.Close) { Log("voix : session fermée (" + r.CloseStatusDescription + ")"); break; }
+          acc.Write(buf, 0, r.Count);
+          if (!r.EndOfMessage) continue;
+          string text = Encoding.UTF8.GetString(acc.ToArray()); acc.SetLength(0);
+          try { Handle(js.DeserializeObject(text) as Dictionary<string, object>); }
+          catch (Exception ex) { Log("voix (message) : " + ex.Message); }
+        }
+      } catch (Exception ex) { Log("voix (réception) : " + ex.GetBaseException().Message); }
+      if (ws == s) { ws = null; ready = false; State("ferme"); }
+    }
+
+    static Dictionary<string, object> Dict(Dictionary<string, object> d, string k) { object o; return d != null && d.TryGetValue(k, out o) ? o as Dictionary<string, object> : null; }
+    static string Text(Dictionary<string, object> d, string k) { object o; return d != null && d.TryGetValue(k, out o) && o != null ? Convert.ToString(o) : null; }
+
+    void Handle(Dictionary<string, object> m) {
+      if (m == null) return;
+      LastActivity = DateTime.Now;
+      Dictionary<string, object> u = Dict(m, "usageMetadata");
+      if (u != null) {
+        object a, b;
+        if (u.TryGetValue("promptTokenCount", out a)) tokIn = Math.Max(tokIn, Convert.ToInt64(a));
+        if (u.TryGetValue("responseTokenCount", out b)) tokOut = Math.Max(tokOut, Convert.ToInt64(b));
+      }
+      if (m.ContainsKey("setupComplete")) {
+        ready = true;
+        bool hasAudio; lock (pl) hasAudio = pending.Count > 0;
+        if (talking || hasAudio) SendStart();
+        if (endPending) { endPending = false; FlushPending(); if (startSent) { Send(D("realtimeInput", D("activityEnd", D()))); startSent = false; } State("reflechit"); }
+        return;
+      }
+      Dictionary<string, object> sr = Dict(m, "sessionResumptionUpdate");
+      if (sr != null && Text(sr, "newHandle") != null) handle = Text(sr, "newHandle");
+      if (m.ContainsKey("goAway")) { Log("voix : Gemini demande de se reconnecter"); }
+      Dictionary<string, object> tc = Dict(m, "toolCall");
+      if (tc != null && tc.ContainsKey("functionCalls")) {
+        object[] calls = tc["functionCalls"] as object[];
+        if (calls != null) Task.Run(new Action(delegate { Tools(calls); }));
+      }
+      Dictionary<string, object> c = Dict(m, "serverContent");
+      if (c == null) return;
+      if (c.ContainsKey("interrupted")) player.Reset();
+      string it = Text(Dict(c, "inputTranscription"), "text");
+      if (!string.IsNullOrEmpty(it)) { heard += it; heardForTool += it; if (OnHeard != null) OnHeard(heard.Trim()); }
+      string ot = Text(Dict(c, "outputTranscription"), "text");
+      if (!string.IsNullOrEmpty(ot)) { said += ot; if (OnSaid != null) OnSaid(said.Trim()); State("parle"); }
+      Dictionary<string, object> mt = Dict(c, "modelTurn");
+      if (mt != null && mt.ContainsKey("parts")) {
+        object[] parts = mt["parts"] as object[];
+        if (parts != null) foreach (object p in parts) {
+          Dictionary<string, object> inl = Dict(p as Dictionary<string, object>, "inlineData");
+          string data = Text(inl, "data");
+          if (data != null) { try { player.Play(Convert.FromBase64String(data)); } catch (Exception ex) { Log("voix (son) : " + ex.Message); } }
+        }
+      }
+      if (c.ContainsKey("turnComplete")) {
+        string done = said.Trim();
+        said = ""; heard = "";
+        if (OnTurnDone != null) OnTurnDone(done);
+        if (closeAfter) { closeAfter = false; Task.Run(new Action(delegate { while (player.Busy) System.Threading.Thread.Sleep(200); Close(); })); }
+      }
+    }
+
+    void Tools(object[] calls) {
+      List<object> reps = new List<object>();
+      State("reflechit");
+      foreach (object o in calls) {
+        Dictionary<string, object> call = o as Dictionary<string, object>;
+        if (call == null) continue;
+        string id = Text(call, "id"), name = Text(call, "name");
+        object args; call.TryGetValue("args", out args);
+        string res;
+        if (name == "terminer_conversation") { closeAfter = true; res = "C'est noté : dis juste au revoir en quelques mots."; }
+        else {
+          try {
+            Dictionary<string, object> body = D("nom", name, "arguments", args ?? D());
+            if (name == "demander_jarvis") { body["entendu"] = heardForTool.Length > 2000 ? heardForTool.Substring(heardForTool.Length - 2000) : heardForTool; heardForTool = ""; }
+            Dictionary<string, object> r = js.DeserializeObject(Post("/api/voix/outil", body, 120000)) as Dictionary<string, object>;
+            res = Text(r, "resultat") ?? "";
+          } catch (Exception ex) { res = "Erreur : " + ex.GetBaseException().Message; }
+        }
+        reps.Add(D("id", id, "name", name, "response", D("resultat", res)));
+      }
+      if (reps.Count > 0) Send(D("toolResponse", D("functionResponses", reps)));
+    }
+
+    public void Close() {
+      ClientWebSocket s = ws; ws = null; ready = false;
+      if (s != null) { try { s.CloseAsync(WebSocketCloseStatus.NormalClosure, "fin", System.Threading.CancellationToken.None).Wait(2000); } catch { } }
+      if (tokIn > 0 || tokOut > 0) {
+        long a = tokIn, b = tokOut; tokIn = 0; tokOut = 0;
+        try { Post("/api/voix/fin", D("entree", a, "sortie", b), 10000); } catch { }
+      }
+      State("ferme");
+    }
+    // ferme la session après 3 minutes sans échange (comme la page /voix, la session coûte tant qu'elle est ouverte)
+    public void IdleCheck() {
+      if (ws != null && !talking && !connecting && (DateTime.Now - LastActivity).TotalMinutes > 3 && !player.Busy) Task.Run(new Action(Close));
+    }
+  }
+
   // ===================================================================
   //  L'application : tout l'affichage tourne ici, en code compilé
   // ===================================================================
@@ -400,7 +745,7 @@ namespace Island {
         hoverTimer.Stop();
         // juste après un changement de widget, la vue peut rétrécir et laisser la souris en dessous : on attend qu'elle revienne
         if (!mouseIn && expandedOn && DateTime.Now < holdUntil) { hoverTimer.Interval = TimeSpan.FromMilliseconds(150); hoverTimer.Start(); return; }
-        SetExpanded(mouseIn || typing);
+        SetExpanded(mouseIn || typing || talking);
       };
       win.MouseEnter += delegate { mouseIn = true; Hover(); };
       win.MouseLeave += delegate { mouseIn = false; Hover(); };
@@ -422,11 +767,16 @@ namespace Island {
       Click("BSend", delegate { SendNox(); });
       Click("BConfOk", delegate { Confirm(true); });
       Click("BConfNo", delegate { Confirm(false); });
-      Click("BMic", delegate {
-        string u = Str(G(sync, "noxUrl"));
-        if (u.Length == 0) { ShowPeek(null, "\uE720", "#FFFFFF", "#FF453A", "Nox", "Nox est introuvable", "Vérifie que Tailscale est lancé", 4000, false); Refresh(); return; }
-        try { System.Diagnostics.Process.Start(u + "/voix"); } catch (Exception ex) { Log("voix : " + ex.Message); }
-      });
+      // micro : maintenir pour parler à Nox, relâcher pour qu'il réponde (directement dans la pilule)
+      Button mic = E<Button>("BMic");
+      mic.PreviewMouseLeftButtonDown += delegate(object o, MouseButtonEventArgs ev) { ev.Handled = true; TalkStart(); };
+      mic.PreviewMouseLeftButtonUp += delegate(object o, MouseButtonEventArgs ev) { ev.Handled = true; TalkEnd(); };
+      mic.MouseLeave += delegate { if (talking) TalkEnd(); };
+      voice.OnLog = delegate(string m) { win.Dispatcher.BeginInvoke(new Action(delegate { Log(m); })); };
+      voice.OnState = delegate(string st) { win.Dispatcher.BeginInvoke(new Action(delegate { VoiceState(st); })); };
+      voice.OnHeard = delegate(string t) { win.Dispatcher.BeginInvoke(new Action(delegate { ShowVoiceText("Toi", t); })); };
+      voice.OnSaid = delegate(string t) { win.Dispatcher.BeginInvoke(new Action(delegate { ShowVoiceText("Nox", t); })); };
+      voice.OnTurnDone = delegate(string t) { win.Dispatcher.BeginInvoke(new Action(delegate { VoiceTurnDone(t); })); };
       // glisser un fichier sur la pilule : Nox propose où le ranger
       win.AllowDrop = true;
       win.DragEnter += OnDrag; win.DragOver += OnDrag; win.Drop += OnDrop;
@@ -619,7 +969,7 @@ namespace Island {
     // ---------------- survol / clavier ----------------
     void Hover() {
       hoverTimer.Stop();
-      bool want = mouseIn || typing;
+      bool want = mouseIn || typing || talking;
       if (want == expandedOn) return;
       hoverTimer.Interval = TimeSpan.FromMilliseconds(want ? 60 : 220);
       hoverTimer.Start();
@@ -809,6 +1159,14 @@ namespace Island {
 
     void Tick() {
       Safe("regard", FollowCursor);
+      Safe("voix", delegate {
+        voice.IdleCheck();
+        // musique remise après la réponse de Nox (si c'est la voix qui l'avait mise en pause)
+        if (musicPausedByVoice && !talking && !voice.Speaking && DateTime.Now > resumeMusicAt && voiceState != "reflechit") {
+          musicPausedByVoice = false;
+          if (!Playing()) Cmd("play");
+        }
+      });
       bool sq = noxState == "busy";
       if (sq != squinting) { squinting = sq; Safe("yeux", delegate { Squint(sq); }); }
       tickN++;
@@ -1618,6 +1976,53 @@ namespace Island {
       return jour + " · " + l.ToString("HH:mm");
     }
 
+    // ---------------- voix dans la pilule ----------------
+    readonly Voice voice = new Voice();
+    bool talking, musicPausedByVoice; DateTime resumeMusicAt = DateTime.MinValue; string voiceState = "";
+    void TalkStart() {
+      string u = Str(G(sync, "noxUrl"));
+      if (u.Length == 0) { ShowPeek(null, "\uE720", "#FFFFFF", "#FF453A", "Nox", "Nox est introuvable", "Vérifie que Tailscale est lancé", 4000, false); Refresh(); return; }
+      talking = true; Hover();
+      if (Playing()) { Cmd("play"); musicPausedByVoice = true; }   // on baisse le rideau sur la musique pendant qu'on parle
+      resumeMusicAt = DateTime.MaxValue;
+      ((TextBlock)E<Button>("BMic").Content).Foreground = Br("#FF453A");
+      voice.PressStart(u);
+    }
+    void TalkEnd() {
+      if (!talking) return;
+      talking = false;
+      ((TextBlock)E<Button>("BMic").Content).Foreground = Brushes.White;
+      voice.PressEnd();
+      resumeMusicAt = DateTime.Now.AddSeconds(25);   // filet : la musique revient même si Nox ne répond pas
+      Hover();
+    }
+    void VoiceState(string st) {
+      voiceState = st;
+      TextBlock s = E<TextBlock>("NState");
+      if (st == "ecoute") s.Text = "t'écoute…";
+      else if (st == "reflechit") s.Text = "réfléchit…";
+      else if (st == "parle") s.Text = "parle…";
+      else if (st.StartsWith("erreur:")) { s.Text = "en ligne"; ShowPeek(null, "\uE720", "#FFFFFF", "#FF453A", "Nox", "Vocal indisponible", st.Substring(7), 5000, false); Refresh(); }
+      else s.Text = "en ligne";
+      squinting = st == "reflechit"; Squint(squinting);
+    }
+    void ShowVoiceText(string who, string t) {
+      E<TextBlock>("NLastTime").Text = who == "Toi" ? "Tu dis" : "Nox répond";
+      E<TextBlock>("NLast").Text = t;
+      Vis("NLastBox", true);
+      Vis("NBtns", false);
+    }
+    void VoiceTurnDone(string said) {
+      voiceState = "";
+      E<TextBlock>("NState").Text = "en ligne";
+      resumeMusicAt = DateTime.Now.AddSeconds(1.5);
+      if (!expandedOn && said.Length > 0) {
+        string t1 = said.Length > 60 ? said.Substring(0, 60).TrimEnd() + "…" : said;
+        ShowPeek(null, "\uE720", "#FFFFFF", "#849C8B", "Nox", t1, said.Length > 60 ? (said.Length > 140 ? said.Substring(60, 80).Trim() + "…" : said.Substring(60).Trim()) : "", 7000, false);
+        Refresh();
+      }
+    }
+
     void Confirm(bool yes) {
       Hashtable n = G(sync, "nox") as Hashtable;
       Hashtable conf = n == null ? null : G(n, "confirm") as Hashtable;
@@ -1631,7 +2036,7 @@ namespace Island {
 '@
 
 try {
-  Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Net.Http
+  Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Net.Http, System.Web.Extensions
   Add-Type -AssemblyName System.Runtime.WindowsRuntime
   $refs = @(
     'System.dll',
@@ -1639,7 +2044,8 @@ try {
     [System.Windows.Media.Color].Assembly.Location,
     [System.Windows.DependencyObject].Assembly.Location,
     [System.Xaml.XamlReader].Assembly.Location,
-    [System.Management.Automation.PSObject].Assembly.Location
+    [System.Management.Automation.PSObject].Assembly.Location,
+    [System.Web.Script.Serialization.JavaScriptSerializer].Assembly.Location
   )
   Add-Type -ReferencedAssemblies $refs -TypeDefinition $CSharp -IgnoreWarnings -ErrorAction Stop
 } catch { Fail 'compilation' ((@($Error | Select-Object -First 8 | ForEach-Object { $_.ToString() }) -join ' | ')) }
@@ -2362,9 +2768,9 @@ $workers = @(
               <Border Margin="0,10,0,0" CornerRadius="17" Background="#1FFFFFFF" Height="34" Padding="14,0,3,0">
                 <DockPanel>
                   <Button x:Name="BSend" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Padding="7"><TextBlock Text="&#xE724;" FontFamily="Segoe Fluent Icons" FontSize="13"/></Button>
-                  <Button x:Name="BMic" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Padding="7" ToolTip="Parler à Nox"><TextBlock Text="&#xE720;" FontFamily="Segoe Fluent Icons" FontSize="13"/></Button>
+                  <Button x:Name="BMic" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Padding="7" ToolTip="Maintiens pour parler à Nox"><TextBlock Text="&#xE720;" FontFamily="Segoe Fluent Icons" FontSize="13"/></Button>
                   <Grid VerticalAlignment="Center">
-                    <TextBlock x:Name="NPh" Text="Demander à Nox… (ou glisse un fichier sur la pilule)" FontSize="13" Foreground="#8E8E93" IsHitTestVisible="False"/>
+                    <TextBlock x:Name="NPh" Text="Écris à Nox, ou maintiens le micro pour lui parler" FontSize="13" Foreground="#8E8E93" IsHitTestVisible="False"/>
                     <TextBox x:Name="NInput" Background="Transparent" BorderThickness="0" Foreground="White" CaretBrush="White" FontSize="13" Padding="-2,0,0,0" FontFamily="Segoe UI Variable Text, Segoe UI"/>
                   </Grid>
                 </DockPanel>
