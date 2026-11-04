@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.14'
+$Version = '4.15'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -142,6 +142,7 @@ namespace Island {
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] struct SPS { public byte AC; public byte Flag; public byte Pct; public byte Saver; public int Life; public int Full; }
     [DllImport("kernel32.dll")] static extern bool GetSystemPowerStatus(out SPS s);
     const int WS_EX_NOACTIVATE = 0x08000000, WS_EX_TOOLWINDOW = 0x00000080;
@@ -330,11 +331,10 @@ namespace Island {
       waveTimer = new DispatcherTimer(DispatcherPriority.Render, win.Dispatcher);
       waveTimer.Interval = TimeSpan.FromMilliseconds(22);
       waveTimer.Tick += delegate { Safe("vague", DrawWave); };
-      E<TextBlock>("EApp").Foreground = accentBrush;
       LinearGradientBrush bg = new LinearGradientBrush();
       bg.StartPoint = new Point(0.5, 0); bg.EndPoint = new Point(0.5, 1);
       bg.GradientStops.Add(new GradientStop(Colors.Black, 0));
-      bg.GradientStops.Add(new GradientStop(Colors.Black, 0.5));
+      bg.GradientStops.Add(new GradientStop(Colors.Black, 0.68));   // teinte seulement dans le bas (avis design)
       tintStop = new GradientStop(Colors.Black, 1);
       bg.GradientStops.Add(tintStop);
       bg.MappingMode = BrushMappingMode.RelativeToBoundingBox;
@@ -669,7 +669,7 @@ namespace Island {
         tb.Visibility = avail ? Visibility.Visible : Visibility.Collapsed;
         bool on = pageNames[i] == name;
         tb.Background = on ? Br("#26FFFFFF") : Brushes.Transparent;
-        tb.Foreground = on ? (Brush)Br("#FFFFFF") : Br("#8E8E93");
+        tb.Foreground = on ? (Brush)Br("#FFFFFF") : Br("#A1A1A6");
       }
     }
 
@@ -686,7 +686,41 @@ namespace Island {
       if (q != null) q.Enqueue(c); else Log("file Nox introuvable");
     }
 
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out Win.POINT p);
+    bool looking;
+    // les yeux suivent la souris quand elle s'approche de la pilule réduite
+    void FollowCursor() {
+      if (layer != "Compact" || hwnd == IntPtr.Zero) { looking = false; return; }
+      FrameworkElement eyes = E<FrameworkElement>("CEyes");
+      if (eyes.Visibility != Visibility.Visible || !eyes.IsLoaded) return;
+      Win.POINT p; if (!GetCursorPos(out p)) return;
+      Point c = eyes.PointToScreen(new Point(eyes.ActualWidth / 2, eyes.ActualHeight / 2));
+      double dx = p.X - c.X, dy = p.Y - c.Y, dist = Math.Sqrt(dx * dx + dy * dy);
+      TranslateTransform t = (TranslateTransform)E<UIElement>("CPupils").RenderTransform;
+      if (dist < 500 && dist > 8) {
+        looking = true;
+        double tx = Math.Max(-2.2, Math.Min(2.2, dx / 40.0)), ty = Math.Max(-1.0, Math.Min(1.0, dy / 60.0));
+        Anim(t, TranslateTransform.XProperty, tx, 160, 0, null); Anim(t, TranslateTransform.YProperty, ty, 160, 0, null);
+        nextLook = DateTime.Now.AddSeconds(2);
+      } else if (looking) {
+        looking = false;
+        Anim(t, TranslateTransform.YProperty, 0, 250, 0, null);
+      }
+    }
+    // yeux plissés quand Nox travaille
+    void Squint(bool on) {
+      foreach (string e in new[] { "EyeL", "EyeR" }) {
+        FrameworkElement fe = E<FrameworkElement>(e);
+        Anim(fe, FrameworkElement.HeightProperty, on ? 5.0 : 9.0, 260, 0, null);
+        Canvas.SetTop(fe, on ? 2.5 : 0.5);
+      }
+    }
+    bool squinting;
+
     void Tick() {
+      Safe("regard", FollowCursor);
+      bool sq = noxState == "busy";
+      if (sq != squinting) { squinting = sq; Safe("yeux", delegate { Squint(sq); }); }
       tickN++;
       DateTime now = DateTime.Now;
       if (tickN % 60 == 0) Audio.Reset();
@@ -820,8 +854,9 @@ namespace Island {
 
       // teinte du bas : pochette quand ça joue, violet de Nox sinon
       Color col = accentDefault; double level;
-      if (hasMedia && (playing || name == "Expanded")) { col = accent; level = name == "Compact" ? 0.42 : 0.5; }
-      else level = name == "Compact" ? 0.26 : (name == "Expanded" ? 0.34 : 0.18);
+      // teinte légère (avis design : la bande saturée faisait « défaut d'affichage »)
+      if (hasMedia && (playing || name == "Expanded")) { col = accent; level = name == "Compact" ? 0.14 : 0.3; }
+      else level = name == "Compact" ? 0.08 : (name == "Expanded" ? 0.18 : 0.08);
       string tk = level + "|" + col;
       if (tk != tintKey) { tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450); }
     }
@@ -881,6 +916,17 @@ namespace Island {
       t.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
       double tw = Math.Ceiling(t.DesiredSize.Width), max = 150;
       E<FrameworkElement>("CTitleBox").Width = Math.Min(tw, max);
+      // fondu sur les bords quand le titre défile (au lieu d'être coupé net)
+      if (tw > max) {
+        LinearGradientBrush fade = new LinearGradientBrush();
+        fade.StartPoint = new Point(0, 0.5); fade.EndPoint = new Point(1, 0.5);
+        fade.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0, 0, 0), 0));
+        fade.GradientStops.Add(new GradientStop(Colors.Black, 0.07));
+        fade.GradientStops.Add(new GradientStop(Colors.Black, 0.93));
+        fade.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0, 0, 0), 1));
+        fade.Freeze();
+        E<UIElement>("CTitleBox").OpacityMask = fade;
+      } else E<UIElement>("CTitleBox").OpacityMask = null;
       if (tw > max) {
         double dist = tw - max, scroll = Math.Max(1.5, dist / 28.0);
         double t1 = 2.2, t2 = t1 + scroll, t3 = t2 + 1.8, t4 = t3 + 0.5;
@@ -1005,6 +1051,14 @@ namespace Island {
         trackKey = Str(G(md, "key"));
         ImageSource art = G(md, "art") as ImageSource;
         SetArt("CArtBox", art); SetArt("EArtBox", art);
+        foreach (string ab in new[] { "CArtBox", "EArtBox" }) {   // nouvelle pochette : fondu + léger zoom
+          FrameworkElement fe = E<FrameworkElement>(ab);
+          ScaleTransform zs = fe.RenderTransform as ScaleTransform;
+          if (zs == null) { zs = new ScaleTransform(1, 1); fe.RenderTransform = zs; fe.RenderTransformOrigin = new Point(0.5, 0.5); }
+          zs.ScaleX = 0.9; zs.ScaleY = 0.9; fe.Opacity = 0;
+          Anim(zs, ScaleTransform.ScaleXProperty, 1, 420, 0, Back(0.3)); Anim(zs, ScaleTransform.ScaleYProperty, 1, 420, 0, Back(0.3));
+          Anim(fe, UIElement.OpacityProperty, 1, 300, 0, null);
+        }
         Vis("EArtIco", art == null);
         string title = Str(G(md, "title")), artist = Str(G(md, "artist")), app = AppName(Str(G(md, "app")));
         E<TextBlock>("ETitle").Text = title; E<TextBlock>("EArtist").Text = artist; E<TextBlock>("EApp").Text = app;
@@ -1024,7 +1078,9 @@ namespace Island {
         accent = accentDefault; AnimColor(accentBrush, SolidColorBrush.ColorProperty, accent, 600);
       }
       Vis("BPrev", md != null); Vis("BNext", md != null);
-      E<TextBlock>("BPlayIco").Text = Bool(G(sync, "playing")) ? "" : "";
+      bool pl = Bool(G(sync, "playing"));
+      Vis("BPauseShape", pl); Vis("BPlayShape", !pl);
+      E<TextBlock>("BPlayIco").Text = pl ? "" : "";
       Hashtable tl = G(sync, "timeline") as Hashtable;
       if (md != null && tl != null && Num(G(tl, "end")) > 1) {
         double end = Num(G(tl, "end")), cur = Num(G(tl, "pos"));
@@ -1784,16 +1840,16 @@ $workers = @(
             <Rectangle x:Name="Eq3" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
             <Rectangle x:Name="Eq4" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
           </StackPanel>
-          <Grid x:Name="CEyes" Width="18" Height="11" Margin="9,0,0,0" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+          <Grid x:Name="CEyes" Width="16" Height="10" Margin="9,0,0,0" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5" Opacity="0.85">
             <Grid.RenderTransform><RotateTransform/></Grid.RenderTransform>
             <Border x:Name="EyeMask" Background="Transparent" BorderThickness="0"/>
             <Canvas x:Name="CPupils" Width="18" Height="11">
               <Canvas.RenderTransform><TranslateTransform/></Canvas.RenderTransform>
-              <Grid x:Name="EyeL" Width="5" Height="10" Canvas.Left="2.5" Canvas.Top="0.5" RenderTransformOrigin="0.5,0.5">
+              <Grid x:Name="EyeL" Width="4.5" Height="9" Canvas.Left="2.2" Canvas.Top="0.5" RenderTransformOrigin="0.5,0.5">
                 <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
                 <Ellipse x:Name="CEyeFillL" Fill="#F4EFE6"/>
               </Grid>
-              <Grid x:Name="EyeR" Width="5" Height="10" Canvas.Left="10.5" Canvas.Top="0.5" RenderTransformOrigin="0.5,0.5">
+              <Grid x:Name="EyeR" Width="4.5" Height="9" Canvas.Left="9.3" Canvas.Top="0.5" RenderTransformOrigin="0.5,0.5">
                 <Grid.RenderTransform><ScaleTransform/></Grid.RenderTransform>
                 <Ellipse x:Name="CEyeFillR" Fill="#F4EFE6"/>
               </Grid>
@@ -1878,9 +1934,9 @@ $workers = @(
                 <StackPanel Grid.Column="1" Margin="13,0,8,0" VerticalAlignment="Center">
                   <TextBlock x:Name="ETitle" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="16" TextTrimming="CharacterEllipsis"/>
                   <TextBlock x:Name="EArtist" FontSize="13" Foreground="#C7C7CC" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
-                  <TextBlock x:Name="EApp" FontSize="11" Margin="0,3,0,0"/>
+                  <TextBlock x:Name="EApp" FontSize="11" Foreground="#8E8E93" Margin="0,3,0,0"/>
                 </StackPanel>
-                <StackPanel Grid.Column="2" Orientation="Horizontal" Height="16" VerticalAlignment="Top" Margin="0,4,0,0">
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Height="16" VerticalAlignment="Top" Margin="0,4,0,0" Visibility="Collapsed">
                   <Rectangle x:Name="Eq5" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
                   <Rectangle x:Name="Eq6" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
                   <Rectangle x:Name="Eq7" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
@@ -1888,8 +1944,8 @@ $workers = @(
                 </StackPanel>
               </Grid>
               <DockPanel x:Name="EProg" Margin="0,10,0,0">
-                <TextBlock x:Name="EPos" DockPanel.Dock="Left" FontSize="11" Foreground="#AEAEB2" Width="36" VerticalAlignment="Center"/>
-                <TextBlock x:Name="ELeft" DockPanel.Dock="Right" FontSize="11" Foreground="#AEAEB2" Width="40" TextAlignment="Right" VerticalAlignment="Center"/>
+                <TextBlock x:Name="EPos" DockPanel.Dock="Left" FontSize="12" Foreground="#AEAEB2" Width="38" Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"/>
+                <TextBlock x:Name="ELeft" DockPanel.Dock="Right" FontSize="12" Foreground="#AEAEB2" Width="42" Typography.NumeralAlignment="Tabular" TextAlignment="Right" VerticalAlignment="Center"/>
                 <Grid x:Name="EBarHit" VerticalAlignment="Center" Height="18" Background="#00000000" Cursor="Hand">
                   <!-- reste du morceau : trait fin ; partie écoutée : vague qui ondule pendant la lecture -->
                   <Path x:Name="ERest" StrokeThickness="3" Stroke="#30FFFFFF" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
@@ -1901,9 +1957,13 @@ $workers = @(
                 </Grid>
               </DockPanel>
               <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,2,0,0">
-                <Button x:Name="BPrev" Style="{StaticResource IconBtn}" Padding="9" Margin="0,0,16,0"><TextBlock Text="&#xE892;" FontFamily="Segoe Fluent Icons" FontSize="16"/></Button>
-                <Button x:Name="BPlay" Style="{StaticResource IconBtn}" Padding="9"><TextBlock x:Name="BPlayIco" Text="&#xE769;" FontFamily="Segoe Fluent Icons" FontSize="22"/></Button>
-                <Button x:Name="BNext" Style="{StaticResource IconBtn}" Padding="9" Margin="16,0,0,0"><TextBlock Text="&#xE893;" FontFamily="Segoe Fluent Icons" FontSize="16"/></Button>
+                <Button x:Name="BPrev" Style="{StaticResource IconBtn}" Padding="10" Margin="0,0,18,0"><Path Width="20" Height="16" Fill="White" Stretch="Uniform" Data="M2,0 L4.5,0 L4.5,16 L2,16 Z M20,0.6 L20,15.4 Q20,16.6 19,16 L6.4,8.9 Q5.5,8 6.4,7.1 L19,0 Q20,-0.6 20,0.6 Z"/></Button>
+                <Button x:Name="BPlay" Style="{StaticResource IconBtn}" Padding="10"><Grid Width="28" Height="28">
+                  <TextBlock x:Name="BPlayIco" Visibility="Collapsed"/>
+                  <Path x:Name="BPauseShape" Fill="White" Data="M7,3.5 Q7,2 8.5,2 L11,2 Q12.5,2 12.5,3.5 L12.5,24.5 Q12.5,26 11,26 L8.5,26 Q7,26 7,24.5 Z M15.5,3.5 Q15.5,2 17,2 L19.5,2 Q21,2 21,3.5 L21,24.5 Q21,26 19.5,26 L17,26 Q15.5,26 15.5,24.5 Z"/>
+                  <Path x:Name="BPlayShape" Fill="White" Visibility="Collapsed" Data="M8,3.8 Q8,1.9 9.7,2.9 L24.6,12.3 Q26.1,13.3 24.6,14.3 L9.7,23.7 Q8,24.7 8,22.8 Z"/>
+                </Grid></Button>
+                <Button x:Name="BNext" Style="{StaticResource IconBtn}" Padding="10" Margin="18,0,0,0"><Path Width="20" Height="16" Fill="White" Stretch="Uniform" Data="M18,0 L15.5,0 L15.5,16 L18,16 Z M0,0.6 L0,15.4 Q0,16.6 1,16 L13.6,8.9 Q14.5,8 13.6,7.1 L1,0 Q0,-0.6 0,0.6 Z"/></Button>
               </StackPanel>
             </StackPanel>
 
