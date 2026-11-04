@@ -2,7 +2,7 @@
 #  Dynamic Island de Mathis - Windows 11
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '2.2'
+$Version = '2.3'
 
 # ---------- Réglages ----------
 $NoxStatusUrl     = ""         # ex. "https://ton-vps/nox/status" (JSON) ; vide = non connecté
@@ -443,15 +443,13 @@ $bgHandle = $bg.BeginInvoke()
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Border x:Name="b" Background="#00FFFFFF" CornerRadius="22" Padding="{TemplateBinding Padding}" RenderTransformOrigin="0.5,0.5">
-              <Border.RenderTransform><ScaleTransform x:Name="sc"/></Border.RenderTransform>
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#1FFFFFFF"/></Trigger>
               <Trigger Property="IsPressed" Value="True">
                 <Setter TargetName="b" Property="Background" Value="#38FFFFFF"/>
-                <Setter TargetName="sc" Property="ScaleX" Value="0.88"/>
-                <Setter TargetName="sc" Property="ScaleY" Value="0.88"/>
+                <Setter TargetName="b" Property="RenderTransform"><Setter.Value><ScaleTransform ScaleX="0.88" ScaleY="0.88"/></Setter.Value></Setter>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -484,7 +482,7 @@ $bgHandle = $bg.BeginInvoke()
   <StackPanel x:Name="Row" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,8,0,0">
     <Border x:Name="Pill" VerticalAlignment="Top" Width="150" Height="36" CornerRadius="18" RenderTransformOrigin="0.5,0">
       <Border.RenderTransform><ScaleTransform x:Name="PillScale"/></Border.RenderTransform>
-      <Grid x:Name="Content">
+      <Grid x:Name="Body">
 
         <!-- COMPACT -->
         <DockPanel x:Name="Compact" Height="36" VerticalAlignment="Top" Margin="7,0,13,0">
@@ -626,9 +624,10 @@ $bgHandle = $bg.BeginInvoke()
 </Window>
 "@
 
-$win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+try { $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml)) }
+catch { Log ("XAML : " + $_.Exception.InnerException.Message + " | " + $_.Exception.Message); exit }
 $ui = @{}
-foreach ($n in 'Row','Pill','PillScale','Content','Compact','CArtBox','CArt','CTimerIco','CClock','CEq','Eq1','Eq2','Eq3','Eq4','CTimer','CBatt','CBattTxt','CBattIco','CNox',
+foreach ($n in 'Row','Pill','PillScale','Body','Compact','CArtBox','CArt','CTimerIco','CClock','CEq','Eq1','Eq2','Eq3','Eq4','CTimer','CBatt','CBattTxt','CBattIco','CNox',
                'Toast','TIco','TRight','TText','TBarBg','TBar','Peek','PArtBox','PIco','PArt','PTitle','PSub',
                'Expanded','EMedia','EArtBox','EArt','ETitle','EArtist','EApp','EEq','Eq5','Eq6','Eq7','Eq8','EProg','EBarHit','EPos','ELeft','EBar','EBarScale','ECtrl',
                'BPrev','BPlay','BPlayIco','BNext','EClockBox','EClock','EDate','ENoxDot','ENoxTxt','EBattIco','EBattTxt','ETimerTxt','BT25','BT5','BTStop',
@@ -674,7 +673,7 @@ foreach ($l in $Layers) {
   $ui[$l].Effect = New-Object System.Windows.Media.Effects.BlurEffect -Property @{ Radius = 0 }
 }
 
-$Morph = New-Object Island.Morph($ui.Pill, $ui.Content, $ui.Bubble, 150, 36)
+$Morph = New-Object Island.Morph($ui.Pill, $ui.Body, $ui.Bubble, 150, 36)
 
 # ---------- Etat ----------
 $Isl = @{
