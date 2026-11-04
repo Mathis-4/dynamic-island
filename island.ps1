@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.7'
+$Version = '4.8'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -737,7 +737,7 @@ namespace Island {
         Vis("CArtBox", music); Vis("CTitleBox", music); Vis("CEq", music);
         // plus d'anneau de batterie (demande de Mathis) : l'anneau sert au minuteur et au prochain rendez-vous
         Vis("CRingBox", (timerOn || ev) && !music); Vis("CTimer", timerOn && !music); Vis("CEvent", ev && !music);
-        Vis("CClock", !music && !timerOn && !ev); Vis("CEyes", !music);
+        Vis("CClock", !music && !timerOn && !ev); Vis("CEyes", true);   // le masque de Nox reste aussi pendant la musique
         Path ring = E<Path>("CRing");
         if (timerOn && !music) {
           ring.Stroke = Br(timerColor);
@@ -748,7 +748,7 @@ namespace Island {
           string t = evTitle.Length > 22 ? evTitle.Substring(0, 21).TrimEnd() + "…" : evTitle;
           E<TextBlock>("CEvent").Text = t + (evMin > 0.5 ? " · " + (int)Math.Ceiling(evMin) + " min" : " · maintenant");
         }
-        string ck = music + "|" + timerOn + "|" + ev + "|" + clock + "|" + E<TextBlock>("CTimer").Text + "|" + E<TextBlock>("CEvent").Text + "|" + E<FrameworkElement>("CTitleBox").Width;
+        string ck = "m" + music + "|" + timerOn + "|" + ev + "|" + clock + "|" + E<TextBlock>("CTimer").Text + "|" + E<TextBlock>("CEvent").Text + "|" + E<FrameworkElement>("CTitleBox").Width;
         if (ck != compactKey) { compactKey = ck; compactW = Math.Max(150, Math.Ceiling(Natural(compact, double.NaN).Width)); }
         w = compactW; h = 34; r = 16; resp = 0.34; damp = 0.86;
         if (music && timerOn) {
@@ -765,7 +765,7 @@ namespace Island {
       SetEq(playing);
       UpdateEyes(now);
       // pendant la musique, Nox jette un œil sous la pilule quand il travaille ou a un message pour toi
-      bool wantPeek = name == "Compact" && playing && (noxState == "busy" || noxUnread);
+      bool wantPeek = false;   // remplacé par le masque dans la pilule (demande de Mathis)
       if (wantPeek != peeking) {
         peeking = wantPeek;
         Anim((TranslateTransform)E<UIElement>("Peeker").RenderTransform, TranslateTransform.YProperty, wantPeek ? 9 : 0, wantPeek ? 520 : 260, 0, wantPeek ? Back(0.5) : null);
@@ -1702,14 +1702,14 @@ $workers = @(
             </TextBlock>
           </Canvas>
         </Grid>
-        <Grid Grid.Column="2" Margin="0,0,12,0" VerticalAlignment="Center">
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center">
           <StackPanel x:Name="CEq" Orientation="Horizontal" Height="14" VerticalAlignment="Center">
             <Rectangle x:Name="Eq1" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.35"/></Rectangle.RenderTransform></Rectangle>
             <Rectangle x:Name="Eq2" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
             <Rectangle x:Name="Eq3" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.5"/></Rectangle.RenderTransform></Rectangle>
             <Rectangle x:Name="Eq4" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
           </StackPanel>
-          <Grid x:Name="CEyes" Width="24" Height="12" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+          <Grid x:Name="CEyes" Width="24" Height="12" Margin="10,0,0,0" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
             <Grid.RenderTransform><RotateTransform/></Grid.RenderTransform>
             <Border x:Name="EyeMask" CornerRadius="6" Background="#F4EFE6" BorderBrush="#FF453A" BorderThickness="0"/>
             <Canvas x:Name="CPupils" Width="24" Height="12">
@@ -1724,7 +1724,7 @@ $workers = @(
               </Grid>
             </Canvas>
           </Grid>
-        </Grid>
+        </StackPanel>
       </Grid>
 
       <!-- TOAST (volume, charge) -->
