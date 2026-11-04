@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.0'
+$Version = '4.1'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -277,7 +277,7 @@ namespace Island {
     DateTime toastUntil = DateTime.MinValue, peekUntil = DateTime.MinValue, restartAt = DateTime.MinValue;
     DateTime nextBlink = DateTime.Now.AddSeconds(3), nextLook = DateTime.Now.AddSeconds(5), lastPage = DateTime.MinValue;
     string targetKey = "", tintKey = "", trackKey = "", marqueeText = null, page = "PgToday", compactKey = "", peekKey = "";
-    double compactW = 160; Size peekSize = new Size(300, 60);
+    double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
     DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
     double vol = -2; bool muted = false; int battPct = 100; bool? power = null; bool lowWarned = false;
@@ -534,12 +534,13 @@ namespace Island {
       hoverTimer.Stop();
       bool want = mouseIn || typing;
       if (want == expandedOn) return;
-      hoverTimer.Interval = TimeSpan.FromMilliseconds(want ? 60 : 160);
+      hoverTimer.Interval = TimeSpan.FromMilliseconds(want ? 60 : 220);
       hoverTimer.Start();
     }
     void SetExpanded(bool on) {
       if (on == expandedOn) return;
       expandedOn = on;
+      if (!on) { stickyH = 0; expKey = ""; }
       if (on) {
         bool playing = Playing();
         if (DateTime.Now < peekUntil && (peekIsConfirm || E<TextBlock>("PApp").Text == "Nox")) { peekUntil = DateTime.MinValue; ShowPage("PgNox", 0); }
@@ -685,8 +686,12 @@ namespace Island {
         name = "Expanded";
         List<string> l = PageList();
         if (!l.Contains(page)) ShowPage("PgToday", 0);
-        Size s = Natural(expanded, 440);
-        w = 440; h = Math.Ceiling(s.Height); r = 30; resp = 0.42; damp = 0.8;
+        // la vue ne rétrécit pas tant que la souris est dessus (sinon elle se refermerait sous le curseur)
+        string ek = page + "|" + VisKey("NConfirm") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
+        if (ek != expKey) { expKey = ek; expanded.Height = double.NaN; expNatural = Math.Ceiling(Natural(expanded, 440).Height); }
+        stickyH = Math.Max(stickyH, expNatural);
+        expanded.Height = stickyH;
+        w = 440; h = stickyH; r = 30; resp = 0.42; damp = 0.8;
       } else if (now < toastUntil) {
         name = "Toast"; w = 300; h = 34; r = 16; resp = 0.32; damp = 0.82;
       } else if (now < peekUntil) {
@@ -730,6 +735,7 @@ namespace Island {
       string tk = level + "|" + col;
       if (tk != tintKey) { tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450); }
     }
+    string VisKey(string n) { return E<UIElement>(n).Visibility == Visibility.Visible ? "1" : "0"; }
     void Vis(string n, bool on) { E<UIElement>(n).Visibility = on ? Visibility.Visible : Visibility.Collapsed; }
 
     void SetEq(bool on) {
@@ -1532,8 +1538,8 @@ $workers = @(
 
       <!-- VUE OUVERTE : 4 widgets -->
       <Border x:Name="Expanded" Width="440" Padding="20,12,20,10">
-        <StackPanel>
-          <Grid>
+        <DockPanel LastChildFill="False">
+          <Grid DockPanel.Dock="Top">
 
             <!-- Musique -->
             <StackPanel x:Name="PgMusic">
@@ -1657,7 +1663,7 @@ $workers = @(
           </Grid>
 
           <!-- onglets : clic, ou molette / deux doigts -->
-          <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
             <Button x:Name="TabMusic" Style="{StaticResource Tab}">
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -1683,7 +1689,7 @@ $workers = @(
               </StackPanel>
             </Button>
           </StackPanel>
-        </StackPanel>
+        </DockPanel>
       </Border>
     </Canvas>
   </Canvas>
