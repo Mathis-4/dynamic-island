@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.30'
+$Version = '4.31'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -2008,6 +2008,9 @@ namespace Island {
       List<Hashtable> list = new List<Hashtable>();
       string key = Str(G(h, "allumees")) + "/" + Str(G(h, "total")) + "|";
       if (rooms != null && !(rooms is string)) foreach (object o in rooms) { Hashtable p = U(o) as Hashtable; if (p != null) { list.Add(p); key += Str(G(p, "nom")) + Bool(G(p, "allumee")) + Str(G(p, "lum")) + ";"; } }
+      foreach (string g in new List<string>(houseOverride.Keys)) if (DateTime.Now >= (DateTime)houseOverride[g][2]) houseOverride.Remove(g);
+      key += "|" + houseOverride.Count;
+      if (roomDragging) return;   // pas de redessin pendant qu'on règle une pièce
       E<TextBlock>("HSummary").Text = Str(G(h, "total")).Length > 0 ? Str(G(h, "allumees")) + " / " + Str(G(h, "total")) + " lampes allumées" : "";
       if (key == houseKey) return;
       houseKey = key; houseRev++;
@@ -2016,16 +2019,77 @@ namespace Island {
         if (grid.Children.Count == 6) break;
         string groupe = Str(G(p, "groupe")), nom = Str(G(p, "nom"));
         bool on = Bool(G(p, "allumee"));
-        string sub = on ? (Str(G(p, "lum")).Length > 0 ? Str(G(p, "lum")) + " %" : "allumée") : "éteinte";
-        Border tile = null;
-        tile = Tile(on ? "\uEA80" : "\uE781", nom, sub, on, delegate {
-          NoxCmd("house:piece:" + groupe + ":" + (on ? "0" : "1"));
-          tile.Opacity = 0.55;   // en cours… l'état réel revient quelques secondes après
-        });
-        grid.Children.Add(tile);
+        int lum; if (!int.TryParse(Str(G(p, "lum")), out lum)) lum = on ? 100 : 0;
+        object[] ov;   // changement fait à l'instant : on garde ce qu'on vient de régler le temps que Hue suive
+        if (houseOverride.TryGetValue(groupe, out ov) && DateTime.Now < (DateTime)ov[2]) { on = (bool)ov[0]; lum = (int)ov[1]; }
+        grid.Children.Add(RoomTile(groupe, nom, on, lum));
       }
       Vis("HEmpty", list.Count == 0);
       if (list.Count == 0) E<TextBlock>("HEmpty").Text = "Pas de lumières trouvées (Hue indisponible ?)";
+    }
+
+    // tuile de pièce façon Centre de contrôle : toucher = allumer / éteindre, glisser = luminosité
+    Dictionary<string, object[]> houseOverride = new Dictionary<string, object[]>();
+    bool roomDragging;
+    FrameworkElement RoomTile(string groupe, string nom, bool on0, int lum0) {
+      bool on = on0; int lum = Math.Max(1, Math.Min(100, lum0));
+      Grid tile = new Grid(); tile.Margin = new Thickness(0, 0, 6, 6); tile.Height = 46; tile.Cursor = Cursors.SizeWE;
+      tile.Background = Brushes.Transparent; tile.ClipToBounds = true;
+      Border back = new Border(); back.CornerRadius = new CornerRadius(12); back.Background = Br("#16FFFFFF");
+      Border fill = new Border(); fill.CornerRadius = new CornerRadius(12); fill.Background = Br("#38FFD60A");
+      ScaleTransform fs = new ScaleTransform(on ? lum / 100.0 : 0, 1); fill.RenderTransform = fs; fill.RenderTransformOrigin = new Point(0, 0.5);
+      StackPanel sp = new StackPanel(); sp.Orientation = Orientation.Horizontal; sp.Margin = new Thickness(10, 0, 8, 0); sp.VerticalAlignment = VerticalAlignment.Center;
+      TextBlock ic = new TextBlock(); ic.FontFamily = new FontFamily("Segoe Fluent Icons"); ic.FontSize = 14; ic.VerticalAlignment = VerticalAlignment.Center;
+      StackPanel tx = new StackPanel(); tx.Margin = new Thickness(8, 0, 0, 0);
+      TextBlock a = new TextBlock(); a.Text = nom; a.FontSize = 12.5; a.FontWeight = FontWeights.SemiBold; a.TextTrimming = TextTrimming.CharacterEllipsis;
+      TextBlock b = new TextBlock(); b.FontSize = 11; b.Foreground = Br("#AEAEB2");
+      tx.Children.Add(a); tx.Children.Add(b); sp.Children.Add(ic); sp.Children.Add(tx);
+      tile.Children.Add(back); tile.Children.Add(fill); tile.Children.Add(sp);
+      Action paint = delegate {
+        ic.Text = on ? "\uEA80" : "\uE781"; ic.Foreground = on ? Br("#FFD60A") : Br("#C7C7CC");
+        b.Text = on ? lum + " %" : "éteinte";
+        fs.ScaleX = on ? lum / 100.0 : 0;
+      };
+      paint();
+      double startX = 0; bool moved = false;
+      tile.MouseLeftButtonDown += delegate(object o, MouseButtonEventArgs ev) { startX = ev.GetPosition(tile).X; moved = false; tile.CaptureMouse(); ev.Handled = true; };
+      tile.MouseMove += delegate(object o, MouseEventArgs ev) {
+        if (!tile.IsMouseCaptured) return;
+        double xx = ev.GetPosition(tile).X;
+        if (!moved && Math.Abs(xx - startX) < 5) return;
+        moved = true; roomDragging = true;
+        lum = (int)Math.Round(Math.Max(1, Math.Min(100, xx / Math.Max(1, tile.ActualWidth) * 100)));
+        on = true; paint();
+      };
+      tile.MouseLeftButtonUp += delegate(object o, MouseButtonEventArgs ev) {
+        if (!tile.IsMouseCaptured) return;
+        tile.ReleaseMouseCapture(); ev.Handled = true;
+        if (!moved) { on = !on; paint(); SendLight(groupe, on, on ? lum : 0); }
+        else SendLight(groupe, true, lum);
+        houseOverride[groupe] = new object[] { on, lum, DateTime.Now.AddSeconds(6) };
+        roomDragging = false;
+      };
+      return tile;
+    }
+    // envoi direct à l'appli de Nox (sans attendre le fil de fond) : la lampe réagit tout de suite
+    readonly JavaScriptSerializer json = new JavaScriptSerializer();
+    void SendLight(string groupe, bool on, int lum) {
+      string url = Str(G(sync, "noxUrl"));
+      if (url.Length == 0) { NoxCmd("house:piece:" + groupe + ":" + (on ? "1" : "0")); return; }
+      Dictionary<string, object> body = new Dictionary<string, object>();
+      body["action"] = "piece"; body["groupe"] = groupe; body["allumer"] = on; body["leger"] = true;
+      if (on) body["luminosite"] = lum;
+      string data = json.Serialize(body);
+      Task.Run(new Action(delegate {
+        try {
+          HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url.TrimEnd('/') + "/api/lumiere");
+          req.Method = "POST"; req.ContentType = "application/json"; req.Headers["X-Jarvis"] = "1"; req.Timeout = 8000; req.UserAgent = "MathisDynamicIsland/1.0";
+          byte[] bb = Encoding.UTF8.GetBytes(data);
+          using (System.IO.Stream s = req.GetRequestStream()) s.Write(bb, 0, bb.Length);
+          using (WebResponse r = req.GetResponse()) { }
+          sync["houseRefresh"] = true;   // relire l'état réel juste après
+        } catch (Exception ex) { win.Dispatcher.BeginInvoke(new Action(delegate { Log("lumière : " + ex.Message); ShowToast("\uE781", "La lumière ne répond pas", "", Rgb("#FF453A"), -1, 2200); Refresh(); })); }
+      }));
     }
 
     // ---------------- Raccourcis Windows ----------------
@@ -2558,6 +2622,7 @@ $noxScript = {
         } catch { NLog ("maison : " + $_.Exception.Message) }
       }
       if ($sync.houseWanted -and -not $houseWas) { $nextHouse = [DateTime]::Now }
+      if ($sync.houseRefresh) { $sync.houseRefresh = $false; $nextHouse = [DateTime]::Now.AddMilliseconds(600) }
       $houseWas = [bool]$sync.houseWanted
       # agenda des 7 prochains jours (onglet Agenda), toutes les 10 min
       if ([DateTime]::Now -ge $nextWeek) {
