@@ -29,7 +29,7 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 # (on attend quelques secondes que l'ancienne se ferme, pour que « Redémarrer » et les mises à jour marchent)
 $script:mutex = New-Object System.Threading.Mutex($false, "Global\MathisDynamicIsland")
 $owned = $false
-try { $owned = $script:mutex.WaitOne(8000) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+try { $owned = $script:mutex.WaitOne(8000) } catch { $owned = $true }   # ancienne pilule fermée brutalement
 if (-not $owned) { Log 'une autre pilule tourne déjà'; exit }
 
 function Restart-Island {
