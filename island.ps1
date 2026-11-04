@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.2'
+$Version = '4.3'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -1542,8 +1542,35 @@ $workers = @(
 
       <!-- VUE OUVERTE : 4 widgets -->
       <Border x:Name="Expanded" Width="440" Padding="20,12,20,10">
-        <DockPanel LastChildFill="False">
-          <Grid DockPanel.Dock="Top">
+        <DockPanel LastChildFill="True">
+          <!-- onglets : clic, ou molette / deux doigts -->
+          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+            <Button x:Name="TabMusic" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Musique" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
+            <Button x:Name="TabTimer" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE916;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Minuteur" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
+            <Button x:Name="TabNox" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE8BD;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Nox" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
+            <Button x:Name="TabToday" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE787;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Aujourd'hui" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
+          </StackPanel>
+          <Grid VerticalAlignment="Center">
 
             <!-- Musique -->
             <StackPanel x:Name="PgMusic">
@@ -1582,7 +1609,7 @@ $workers = @(
             </StackPanel>
 
             <!-- Minuteur -->
-            <Grid x:Name="PgTimer" Visibility="Collapsed">
+            <Grid x:Name="PgTimer" Visibility="Collapsed" HorizontalAlignment="Center">
               <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <Grid Width="64" Height="64">
                 <Ellipse Width="64" Height="64" Stroke="#33FF9F0A" StrokeThickness="5"/>
@@ -1648,7 +1675,7 @@ $workers = @(
             </StackPanel>
 
             <!-- Aujourd'hui -->
-            <Grid x:Name="PgToday" Visibility="Collapsed">
+            <Grid x:Name="PgToday" Visibility="Collapsed" HorizontalAlignment="Center">
               <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <TextBlock x:Name="EClock" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="40" VerticalAlignment="Center"/>
               <StackPanel Grid.Column="1" Margin="18,0,0,0" VerticalAlignment="Center">
@@ -1666,33 +1693,6 @@ $workers = @(
             </Grid>
           </Grid>
 
-          <!-- onglets : clic, ou molette / deux doigts -->
-          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
-            <Button x:Name="TabMusic" Style="{StaticResource Tab}">
-              <StackPanel Orientation="Horizontal">
-                <TextBlock Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                <TextBlock Text="Musique" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-              </StackPanel>
-            </Button>
-            <Button x:Name="TabTimer" Style="{StaticResource Tab}">
-              <StackPanel Orientation="Horizontal">
-                <TextBlock Text="&#xE916;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                <TextBlock Text="Minuteur" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-              </StackPanel>
-            </Button>
-            <Button x:Name="TabNox" Style="{StaticResource Tab}">
-              <StackPanel Orientation="Horizontal">
-                <TextBlock Text="&#xE8BD;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                <TextBlock Text="Nox" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-              </StackPanel>
-            </Button>
-            <Button x:Name="TabToday" Style="{StaticResource Tab}">
-              <StackPanel Orientation="Horizontal">
-                <TextBlock Text="&#xE787;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                <TextBlock Text="Aujourd'hui" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-              </StackPanel>
-            </Button>
-          </StackPanel>
         </DockPanel>
       </Border>
     </Canvas>
