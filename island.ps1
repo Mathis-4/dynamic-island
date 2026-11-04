@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.28'
+$Version = '4.29'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -1080,7 +1080,7 @@ namespace Island {
     List<string> PageList() {
       List<string> l = new List<string>();
       // ordre fixe, Nox au milieu (demande de Mathis) : un geste à gauche ou à droite suffit
-      l.Add("PgMusic"); l.Add("PgAgenda"); l.Add("PgNox"); l.Add("PgHouse"); l.Add("PgTools");
+      l.Add("PgAgenda"); l.Add("PgMusic"); l.Add("PgNox"); l.Add("PgHouse"); l.Add("PgTools");
       return l;
     }
     void GoPage(string p) {
