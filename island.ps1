@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.8'
+$Version = '4.9'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -285,7 +285,7 @@ namespace Island {
     HashSet<string> evPeeked = new HashSet<string>();
     static readonly Color EventColor = Color.FromRgb(0x0A, 0x84, 0xFF);
     bool dragging; DateTime lastDrag = DateTime.MinValue; string btnKey = "";
-    bool noxUnread, peeking, tilted;
+    bool noxUnread, peeking, tilted; string lastSong = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
     bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
     DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
@@ -749,7 +749,8 @@ namespace Island {
           E<TextBlock>("CEvent").Text = t + (evMin > 0.5 ? " · " + (int)Math.Ceiling(evMin) + " min" : " · maintenant");
         }
         string ck = "m" + music + "|" + timerOn + "|" + ev + "|" + clock + "|" + E<TextBlock>("CTimer").Text + "|" + E<TextBlock>("CEvent").Text + "|" + E<FrameworkElement>("CTitleBox").Width;
-        if (ck != compactKey) { compactKey = ck; compactW = Math.Max(150, Math.Ceiling(Natural(compact, double.NaN).Width)); }
+        if (ck != compactKey || tickN % 10 == 5) {   // re-mesure régulière : au démarrage, la mise en page n'est pas encore prête
+           compactKey = ck; compactW = Math.Max(150, Math.Ceiling(Natural(compact, double.NaN).Width)); }
         w = compactW; h = 34; r = 16; resp = 0.34; damp = 0.86;
         if (music && timerOn) {
           bub = 32;
@@ -978,7 +979,9 @@ namespace Island {
         E<TextBlock>("ETitle").Text = title; E<TextBlock>("EArtist").Text = artist; E<TextBlock>("EApp").Text = app;
         SetMarquee(string.IsNullOrEmpty(artist) ? title : title + " · " + artist);
         if (G(md, "color") is Color) { accent = (Color)G(md, "color"); AnimColor(accentBrush, SolidColorBrush.ColorProperty, accent, 600); }
-        if (!firstTrack && Bool(G(sync, "playing")) && !expandedOn) ShowPeek(art, "", "#FFFFFF", "#1C1C1E", app, title, artist, 3000, false);
+        bool sameSong = (title + "|" + artist) == lastSong;
+        lastSong = title + "|" + artist;
+        if (!firstTrack && !sameSong && Bool(G(sync, "playing")) && !expandedOn) ShowPeek(art, "", "#FFFFFF", "#1C1C1E", app, title, artist, 3000, false);
         firstTrack = false;
       }
       if (md == null && trackKey != "none") {   // rien en lecture : de quoi lancer Spotify
@@ -1278,7 +1281,7 @@ $mediaScript = {
   $http.Timeout = [TimeSpan]::FromSeconds(10)
   $http.DefaultRequestHeaders.UserAgent.ParseAdd('MathisDynamicIsland/1.0')
   $updNext = [DateTime]::Now.AddSeconds(15)
-  $trackKey = ''
+  $trackKey = ''; $artTries = 0; $artNext = [DateTime]::MinValue
   $spotifyUntil = [DateTime]::MinValue
   $fallback = [System.Windows.Media.ColorConverter]::ConvertFromString($sync.accent)
 
@@ -1350,7 +1353,10 @@ $mediaScript = {
           $p = Await ($sess.TryGetMediaPropertiesAsync()) $tProps
           if ($p -and $p.Title) {
             $key = "$($p.Title)|$($p.Artist)|$($sess.SourceAppUserModelId)"
-            if ($key -ne $trackKey) {
+            # pochette pas encore prête (fréquent juste après un démarrage) : on réessaie toutes les 2 s, 10 fois
+            $retryArt = ($key -eq $trackKey -and $artTries -gt 0 -and [DateTime]::Now -ge $artNext)
+            if ($key -ne $trackKey -or $retryArt) {
+              if ($key -ne $trackKey) { $artTries = 10 }
               $trackKey = $key
               $art = $null; $col = $fallback
               try {
@@ -1366,7 +1372,10 @@ $mediaScript = {
                   }
                 }
               } catch { BLog ("pochette : " + $_.Exception.Message) }
-              $sync.media = @{ key = $key; title = [string]$p.Title; artist = [string]$p.Artist; app = [string]$sess.SourceAppUserModelId; art = $art; color = $col }
+              if ($art) { $artTries = 0 } else { $artTries--; $artNext = [DateTime]::Now.AddSeconds(2) }
+              if ($retryArt -and -not $art) { } else {
+              $sync.media = @{ key = $key + $(if ($art) { '|a' } else { '' }); title = [string]$p.Title; artist = [string]$p.Artist; app = [string]$sess.SourceAppUserModelId; art = $art; color = $col }
+              }
             }
             $tl = $sess.GetTimelineProperties()
             $end = ($tl.EndTime - $tl.StartTime).TotalSeconds
