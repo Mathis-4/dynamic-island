@@ -1,7 +1,9 @@
 # Installation / réparation de la Dynamic Island de Mathis
 # Usage (PowerShell) : voir README.md
 $ErrorActionPreference = 'Stop'
-$base = 'https://raw.githubusercontent.com/Mathis-4/dynamic-island/main'
+# Dernière version exacte (évite le cache de GitHub)
+$sha = (Invoke-RestMethod -UseBasicParsing 'https://api.github.com/repos/Mathis-4/dynamic-island/commits/main').sha
+$base = 'https://raw.githubusercontent.com/Mathis-4/dynamic-island/' + $sha
 $d = Join-Path $env:LOCALAPPDATA 'DynamicIsland'
 New-Item -ItemType Directory -Force $d | Out-Null
 
@@ -10,7 +12,7 @@ Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $
   Stop-Process -Id $_.ProcessId -Force; Wait-Process -Id $_.ProcessId -Timeout 5 -ErrorAction SilentlyContinue }
 
 # Télécharge la dernière version
-$bytes = (Invoke-WebRequest -UseBasicParsing ($base + '/island.ps1?t=' + [DateTime]::Now.Ticks)).Content
+$bytes = (Invoke-WebRequest -UseBasicParsing ($base + '/island.ps1')).Content
 if ($bytes -is [string]) { $bytes = [System.Text.Encoding]::UTF8.GetBytes($bytes) }
 $txt = [System.Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)
 [System.IO.File]::WriteAllText((Join-Path $d 'island.ps1'), $txt, (New-Object System.Text.UTF8Encoding $true))

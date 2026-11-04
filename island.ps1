@@ -2,7 +2,7 @@
 #  Dynamic Island de Mathis - Windows 11
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '2.3'
+$Version = '2.4'
 
 # ---------- Réglages ----------
 $NoxStatusUrl     = ""         # ex. "https://ton-vps/nox/status" (JSON) ; vide = non connecté
@@ -17,7 +17,7 @@ $Here    = Split-Path -Parent $MyInvocation.MyCommand.Path
 # Réglages perso (jamais écrasés par les mises à jour) : config.ps1 à côté de ce fichier
 $ConfigPath = Join-Path $Here 'config.ps1'
 if (Test-Path $ConfigPath) { . $ConfigPath }
-$UpdateBase = 'https://raw.githubusercontent.com/Mathis-4/dynamic-island/main'
+$UpdateRepo = 'Mathis-4/dynamic-island'
 $LogPath = Join-Path $Here 'island.log'
 try { Set-Content -Path $LogPath -Value "Dynamic Island v$Version - $(Get-Date)" -Encoding UTF8 } catch {}
 $script:lastLog = ''
@@ -277,7 +277,7 @@ $sync = [hashtable]::Synchronized(@{
   stop = $false; media = $null; playing = $false; timeline = $null; nox = $null
   cmds = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
   logPath = $LogPath; accent = $DefaultAccent
-  dir = $Here; version = $Version; updateBase = $UpdateBase; updated = $null
+  dir = $Here; version = $Version; updateRepo = $UpdateRepo; updated = $null
 })
 
 $bgScript = {
@@ -305,6 +305,7 @@ $bgScript = {
 
   $http = New-Object System.Net.Http.HttpClient
   $http.Timeout = [TimeSpan]::FromSeconds(8)
+  $http.DefaultRequestHeaders.UserAgent.ParseAdd('MathisDynamicIsland/1.0')
   if ($noxToken) { $http.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $noxToken) }
   $noxNext = [DateTime]::MinValue
   $updNext = [DateTime]::Now.AddSeconds(15)
@@ -390,14 +391,18 @@ $bgScript = {
       else { BLog "interface OK (dernier cycle il y a $([int]([DateTime]::Now - $sync.uiBeat).TotalMilliseconds) ms, étape : $($sync.step))" }
     }
     # Mises à jour automatiques depuis GitHub (au démarrage puis toutes les 3 h)
-    if ($sync.updateBase -and -not $sync.updated -and [DateTime]::Now -ge $updNext) {
+    if ($sync.updateRepo -and -not $sync.updated -and [DateTime]::Now -ge $updNext) {
       $updNext = [DateTime]::Now.AddHours(3)
       try {
-        $vt = $http.GetStringAsync($sync.updateBase + '/version.txt?t=' + [DateTime]::Now.Ticks)
+        $ct = $http.GetStringAsync('https://api.github.com/repos/' + $sync.updateRepo + '/commits/main')
+        if (-not $ct.Wait(10000)) { throw 'GitHub injoignable' }
+        $sha = ($ct.Result | ConvertFrom-Json).sha
+        $base = 'https://raw.githubusercontent.com/' + $sync.updateRepo + '/' + $sha
+        $vt = $http.GetStringAsync($base + '/version.txt')
         if ($vt.Wait(10000)) {
           $remote = [version]($vt.Result.Trim())
           if ($remote -gt [version]$sync.version) {
-            $dl = $http.GetByteArrayAsync($sync.updateBase + '/island.ps1?t=' + [DateTime]::Now.Ticks)
+            $dl = $http.GetByteArrayAsync($base + '/island.ps1')
             if ($dl.Wait(30000)) {
               $txt = [System.Text.Encoding]::UTF8.GetString($dl.Result).TrimStart([char]0xFEFF)
               $errs = $null; $tok = $null
