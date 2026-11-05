@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.31'
+$Version = '4.32'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -843,6 +843,16 @@ namespace Island {
         Log("fenêtre créée");
       };
       win.ContentRendered += delegate { Log("fenêtre affichée à l'écran"); };
+      // sortie de veille : l'affichage transparent peut se perdre (carte graphique réinitialisée) -> redémarrage propre
+      Microsoft.Win32.SystemEvents.PowerModeChanged += delegate(object o, Microsoft.Win32.PowerModeChangedEventArgs ev) {
+        if (ev.Mode != Microsoft.Win32.PowerModes.Resume) return;
+        win.Dispatcher.BeginInvoke(new Action(delegate {
+          Log("sortie de veille : redémarrage de la pilule");
+          DispatcherTimer t = new DispatcherTimer(); t.Interval = TimeSpan.FromSeconds(4);
+          t.Tick += delegate { t.Stop(); sync["restart"] = true; win.Close(); };
+          t.Start();
+        }));
+      };
       win.Dispatcher.UnhandledException += delegate(object s2, DispatcherUnhandledExceptionEventArgs ue) { Log("erreur : " + ue.Exception.Message); ue.Handled = true; };
       Place();
 
@@ -2305,6 +2315,29 @@ try {
   Add-Type -ReferencedAssemblies $refs -TypeDefinition $CSharp -IgnoreWarnings -ErrorAction Stop
 } catch { Fail 'compilation' ((@($Error | Select-Object -First 8 | ForEach-Object { $_.ToString() }) -join ' | ')) }
 Log 'code compilé'
+
+# Filet de sécurité : Windows relance la pilule au déverrouillage et à la sortie de veille
+# (si elle tourne déjà, la nouvelle s'arrête toute seule grâce au verrou d'instance unique)
+try {
+  $tache = Get-ScheduledTask -TaskName 'DynamicIsland' -ErrorAction SilentlyContinue
+  if (-not $tache -or $tache.Description -notlike '*v2*') {
+    if ($tache) { Unregister-ScheduledTask -TaskName 'DynamicIsland' -Confirm:$false }
+    $act = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\conhost.exe') -Argument ('--headless powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "' + (Join-Path $Here 'island.ps1') + '"')
+    $user = "$env:USERDOMAIN\$env:USERNAME"
+    $cU = Get-CimClass -Namespace ROOT\Microsoft\Windows\TaskScheduler -ClassName MSFT_TaskSessionStateChangeTrigger
+    $tUnlock = New-CimInstance -CimClass $cU -ClientOnly
+    $tUnlock.StateChange = 8; $tUnlock.UserId = $user; $tUnlock.Enabled = $true; $tUnlock.Delay = 'PT3S'
+    $cE = Get-CimClass -Namespace ROOT\Microsoft\Windows\TaskScheduler -ClassName MSFT_TaskEventTrigger
+    $tResume = New-CimInstance -CimClass $cE -ClientOnly
+    $tResume.Subscription = '<QueryList><Query Id="0" Path="System"><Select Path="System">*[System[Provider[@Name=''Microsoft-Windows-Power-Troubleshooter''] and EventID=1]]</Select></Query></QueryList>'
+    $tResume.Enabled = $true; $tResume.Delay = 'PT5S'
+    $tLogon = New-ScheduledTaskTrigger -AtLogOn -User $user
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    $pr = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName 'DynamicIsland' -Action $act -Trigger @($tUnlock, $tResume, $tLogon) -Settings $set -Principal $pr -Description 'Dynamic Island de Mathis (v2) : relance au déverrouillage et à la sortie de veille' | Out-Null
+    Log 'tâche planifiée créée : relance au déverrouillage, à la sortie de veille et à l''ouverture de session'
+  }
+} catch { Log ("tâche planifiée : " + $_.Exception.Message) }
 
 # ============================================================
 #  Table partagée entre les fils
