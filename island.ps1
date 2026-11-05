@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.33'
+$Version = '4.34'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -36,7 +36,7 @@ try { Set-Content -Path $LogPath -Value "Dynamic Island v$Version - $(Get-Date)"
 function Restart-Island {
   try { $script:mutex.ReleaseMutex() } catch {}
   Start-Process (Join-Path $env:WINDIR 'System32\conhost.exe') ('--headless powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "' + (Join-Path $Here 'island.ps1') + '"')
-  [Environment]::Exit(0)
+  [System.Diagnostics.Process]::GetCurrentProcess().Kill()   # arrêt immédiat : Exit() pouvait rester bloqué avec le menu affiché
 }
 # En cas d'échec au démarrage : retour automatique à la version précédente
 function Fail($what, $err) {
@@ -52,7 +52,7 @@ function Fail($what, $err) {
     Restart-Island
   }
   try { $script:mutex.ReleaseMutex() } catch {}
-  [Environment]::Exit(1)
+  [System.Diagnostics.Process]::GetCurrentProcess().Kill()
 }
 
 $CSharp = @'
@@ -830,9 +830,9 @@ namespace Island {
       MenuItem miLog = new MenuItem { Header = "Ouvrir le journal" };
       miLog.Click += delegate { try { System.Diagnostics.Process.Start("notepad.exe", "\"" + logPath + "\""); } catch { } };
       MenuItem miRestart = new MenuItem { Header = "Redémarrer" };
-      miRestart.Click += delegate { sync["restart"] = true; win.Close(); };
+      miRestart.Click += delegate { CloseFromMenu(menu, true); };
       MenuItem miQuit = new MenuItem { Header = "Quitter" };
-      miQuit.Click += delegate { win.Close(); };
+      miQuit.Click += delegate { CloseFromMenu(menu, false); };
       menu.Items.Add(miLog); menu.Items.Add(miRestart); menu.Items.Add(miQuit);
       win.ContextMenu = menu;
 
@@ -875,6 +875,14 @@ namespace Island {
     static Color Rgb(string hex) { return (Color)ColorConverter.ConvertFromString(hex); }
     static SolidColorBrush Br(string hex) { SolidColorBrush b = new SolidColorBrush(Rgb(hex)); b.Freeze(); return b; }
     static SolidColorBrush Br(Color c) { SolidColorBrush b = new SolidColorBrush(c); b.Freeze(); return b; }
+    // menu : on le referme d'abord, puis on ferme la fenêtre une fois le menu disparu
+    void CloseFromMenu(ContextMenu menu, bool restart) {
+      menu.IsOpen = false;
+      win.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate {
+        if (restart) sync["restart"] = true;
+        win.Hide(); win.Close();
+      }));
+    }
     public void Log(string m) {
       if (m == lastLog) return; lastLog = m;
       try { System.IO.File.AppendAllText(logPath, DateTime.Now.ToString("HH:mm:ss") + " UI  " + m + Environment.NewLine, System.Text.Encoding.UTF8); } catch { }
@@ -3187,4 +3195,4 @@ $sync.stop = $true
 foreach ($w in $workers) { try { $null = $w.BeginStop($null, $null) } catch {} }
 if ($sync.restart) { Log 'redémarrage'; Restart-Island }
 try { $script:mutex.ReleaseMutex() } catch {}
-[Environment]::Exit(0)   # ferme aussi les fils de fond
+[System.Diagnostics.Process]::GetCurrentProcess().Kill()   # ferme aussi les fils de fond, sans attendre
