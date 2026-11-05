@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.43'
+$Version = '4.44'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -1493,7 +1493,7 @@ namespace Island {
       Color col = accentDefault; double level;
       // teinte légère (avis design : la bande saturée faisait « défaut d'affichage »)
       if (playing) { col = accent; level = name == "Compact" ? 0.14 : 0.3; }   // musique en pause = ambiance du moment
-      else level = name == "Compact" ? 0.08 : (name == "Expanded" ? 0.18 : 0.08);
+      else level = name == "Compact" ? 0.13 : (name == "Expanded" ? 0.18 : 0.13);   // 4.44 : sans musique, teinte de l'ambiance un peu plus visible (demande de Mathis, « faiblement »)
       // sans musique : ambiance du moment de la journée (et de Nox), même style que la pochette
       string palKey = PaletteKey(now);
       bool useArt = playing && artTiny != null;
@@ -1503,9 +1503,8 @@ namespace Island {
       string tk = level + "|" + col + "|" + ambKey;
       if (tk != tintKey) {
         tintKey = tk; AnimColor(tintStop, GradientStop.ColorProperty, Fx.Shade(col, level), 450);
-        // liseré coloré seulement pendant la musique ; plus marqué quand la pilule est ouverte
-        bool edge = playing || name == "Expanded";
-        byte alpha = (byte)(edge ? (name == "Compact" ? 200 : (playing ? 240 : 170)) : 0);
+        // liseré coloré : franc pendant la musique, léger sans musique (4.44) ; plus marqué quand la pilule est ouverte
+        byte alpha = (byte)(playing ? (name == "Compact" ? 200 : 240) : (name == "Expanded" ? 170 : 90));
         // couleur éclaircie (35 % vers le blanc) pour se détacher de la teinte du fond
         Color lc = Color.FromRgb((byte)(col.R + (255 - col.R) * 0.45), (byte)(col.G + (255 - col.G) * 0.45), (byte)(col.B + (255 - col.B) * 0.45));
         AnimColor(edgeMid, GradientStop.ColorProperty, Color.FromArgb((byte)(alpha * 0.35), lc.R, lc.G, lc.B), 500);
