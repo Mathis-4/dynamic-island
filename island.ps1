@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.45'
+$Version = '4.46'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -11,6 +11,8 @@ $DefaultAccent    = "#D97B6B"  # terracotta Nox (charte ; avant : violet) — la
 $TimerColor       = "#FF9F0A"
 $ChargeColor      = "#30D158"
 $HideInFullscreen = $true
+$ChromeAdresse    = $true      # Chrome / Edge au premier plan : la pilule descend sur la barre d'adresse (sous les onglets)
+$ChromeDecalage   = 37         # hauteur des onglets quand Chrome est agrandi (à ajuster dans config.ps1 si besoin)
 # ------------------------------
 
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -203,6 +205,32 @@ namespace Island {
       ex = on ? (ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) : ((ex & ~WS_EX_NOACTIVATE) | WS_EX_TOOLWINDOW);
       SetWindowLong(h, -20, ex);
     }
+    [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    static IntPtr lastBrowserHwnd = IntPtr.Zero; static bool lastBrowserIs;
+    // Chrome / Edge au premier plan, qui couvre le point (x, y) en pixels physiques : vrai + haut de la fenêtre et agrandie ou non
+    public static bool BrowserUnder(IntPtr self, int x, int y, out int top, out bool zoomed) {
+      top = 0; zoomed = false;
+      IntPtr h = GetForegroundWindow();
+      if (h == IntPtr.Zero || h == self || IsIconic(h)) return false;
+      if (h != lastBrowserHwnd) {
+        lastBrowserHwnd = h; lastBrowserIs = false;
+        System.Text.StringBuilder sb = new System.Text.StringBuilder(64); GetClassName(h, sb, 64);
+        if (sb.ToString() == "Chrome_WidgetWin_1") {
+          try {
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            string n = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
+            lastBrowserIs = n == "chrome" || n == "msedge";
+          } catch { }
+        }
+      }
+      if (!lastBrowserIs) return false;
+      RECT r; if (!GetWindowRect(h, out r)) return false;
+      zoomed = IsZoomed(h);
+      if (r.L > x || r.R < x || r.T > y || r.B < y + 200) return false;
+      top = r.T; return true;
+    }
     public static bool ForegroundIsFullscreen(int sw, int sh, IntPtr self) {
       IntPtr h = GetForegroundWindow();
       if (h == IntPtr.Zero || h == self) return false;
@@ -237,30 +265,38 @@ namespace Island {
   }
 
   public static class Fx {
-    public static Geometry Notch(double x, double w, double h, double r) {
+    public static Geometry Notch(double x, double w, double h, double r) { return Notch(x, w, h, r, 0); }
+    // rt > 0 : coins du haut arrondis (pilule qui flotte sous les onglets de Chrome, pas collée au bord de l'écran)
+    public static Geometry Notch(double x, double w, double h, double r, double rt) {
       r = Math.Max(0, Math.Min(r, Math.Min(w / 2, h)));
+      rt = Math.Max(0, Math.Min(rt, Math.Min(w / 2, h - r)));
       StreamGeometry g = new StreamGeometry();
       using (StreamGeometryContext c = g.Open()) {
-        c.BeginFigure(new Point(x, 0), true, true);
-        c.LineTo(new Point(x + w, 0), false, false);
+        c.BeginFigure(new Point(x + rt, 0), true, true);
+        c.LineTo(new Point(x + w - rt, 0), false, false);
+        if (rt > 0) c.ArcTo(new Point(x + w, rt), new Size(rt, rt), 0, false, SweepDirection.Clockwise, false, false);
         c.LineTo(new Point(x + w, h - r), false, false);
         c.ArcTo(new Point(x + w - r, h), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
         c.LineTo(new Point(x + r, h), false, false);
         c.ArcTo(new Point(x, h - r), new Size(r, r), 0, false, SweepDirection.Clockwise, false, false);
+        c.LineTo(new Point(x, rt), false, false);
+        if (rt > 0) c.ArcTo(new Point(x + rt, 0), new Size(rt, rt), 0, false, SweepDirection.Clockwise, false, false);
       }
       g.Freeze(); return g;
     }
     // contour des côtés et du bas seulement (le haut touche le bord de l'écran) : tous les segments sont tracés
-    public static Geometry NotchEdge(double x, double w, double h, double r) {
+    public static Geometry NotchEdge(double x, double w, double h, double r) { return NotchEdge(x, w, h, r, 0); }
+    public static Geometry NotchEdge(double x, double w, double h, double r, double rt) {
       r = Math.Max(0, Math.Min(r, Math.Min(w / 2, h)));
+      rt = Math.Max(0, Math.Min(rt, Math.Min(w / 2, h - r)));
       StreamGeometry g = new StreamGeometry();
       using (StreamGeometryContext c = g.Open()) {
-        c.BeginFigure(new Point(x, 0), false, false);
+        c.BeginFigure(new Point(x, rt), false, false);
         c.LineTo(new Point(x, h - r), true, true);
         c.ArcTo(new Point(x + r, h), new Size(r, r), 0, false, SweepDirection.Counterclockwise, true, true);
         c.LineTo(new Point(x + w - r, h), true, true);
         c.ArcTo(new Point(x + w, h - r), new Size(r, r), 0, false, SweepDirection.Counterclockwise, true, true);
-        c.LineTo(new Point(x + w, 0), true, true);
+        c.LineTo(new Point(x + w, rt), true, true);
       }
       g.Freeze(); return g;
     }
@@ -822,6 +858,7 @@ namespace Island {
     DropShadowEffect eyeGlow, eyeGlow2;
     DispatcherTimer tick, hoverTimer;
     bool expandedOn, mouseIn, typing, hiddenFs, restartPending;
+    bool floating; double topTarget = 0;   // v4.46 : pilule descendue sur la barre d'adresse de Chrome
     DateTime toastUntil = DateTime.MinValue, peekUntil = DateTime.MinValue, restartAt = DateTime.MinValue;
     DateTime nextBlink = DateTime.Now.AddSeconds(3), nextLook = DateTime.Now.AddSeconds(5), lastPage = DateTime.MinValue;
     string targetKey = "", tintKey = "", trackKey = "", marqueeText = null, page = "PgNox", tabOrder = "", compactKey = "", peekKey = "";
@@ -1053,7 +1090,35 @@ namespace Island {
     void Place() {
       Rect wa = SystemParameters.WorkArea;
       win.Left = wa.Left + (wa.Width - win.Width) / 2;
-      win.Top = 0;
+      win.Top = topTarget;
+    }
+
+    // v4.46 (demande de Mathis) : Chrome / Edge au premier plan sous la pilule → elle descend sur la barre d'adresse,
+    // juste sous les onglets, coins du haut arrondis ; elle remonte dès qu'on quitte Chrome.
+    void CheckBrowser() {
+      if (hwnd == IntPtr.Zero) return;
+      bool want = false; double top = 0;
+      if (Bool(G(cfg, "chromeShift")) && !hiddenFs) {
+        double sx = 1, sy = 1;
+        PresentationSource ps = PresentationSource.FromVisual(win);
+        if (ps != null && ps.CompositionTarget != null) { Matrix mx = ps.CompositionTarget.TransformToDevice; sx = mx.M11; sy = mx.M22; }
+        Rect wa = SystemParameters.WorkArea;
+        int px = (int)Math.Round((win.Left + win.Width / 2) * sx), py = (int)Math.Round((wa.Top + 17) * sy);
+        int t; bool zoomed;
+        if (Win.BrowserUnder(hwnd, px, py, out t, out zoomed)) {
+          double off = Num(G(cfg, "chromeOffset")); if (off <= 0) off = 37;
+          double winTop = zoomed ? wa.Top : Math.Max(wa.Top, t / sy);
+          want = true; top = winTop + off + (zoomed ? 0 : 8);
+        }
+      }
+      if (want == floating && Math.Abs(top - topTarget) < 0.5) return;
+      floating = want; topTarget = want ? top : 0;
+      DoubleAnimation a = new DoubleAnimation(topTarget, TimeSpan.FromMilliseconds(260));
+      a.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
+      win.BeginAnimation(Window.TopProperty, a);
+      earL.Visibility = floating ? Visibility.Hidden : Visibility.Visible;
+      earR.Visibility = floating ? Visibility.Hidden : Visibility.Visible;
+      Apply();
     }
 
     // ---------------- forme (ressorts, image par image) ----------------
@@ -1086,9 +1151,10 @@ namespace Island {
     void Apply() {
       double w = Math.Max(24, W.Value), h = Math.Max(20, H.Value), r = Math.Max(0, R.Value);
       double x = Cx - w / 2;
-      Geometry g = Fx.Notch(x, w, h, r);
+      double rt = floating ? Math.Min(r, h / 2) : 0;
+      Geometry g = Fx.Notch(x, w, h, r, rt);
       shape.Data = g;
-      edgePath.Data = Fx.NotchEdge(x + 0.8, w - 1.6, h - 0.8, Math.Max(0, r - 0.8));   // légèrement à l'intérieur : pas coupé par le bord
+      edgePath.Data = Fx.NotchEdge(x + 0.8, w - 1.6, h - 0.8, Math.Max(0, r - 0.8), Math.Max(0, rt - 0.8));   // légèrement à l'intérieur : pas coupé par le bord
       clipHost.Clip = g;
       ((TranslateTransform)earL.RenderTransform).X = x - 12;
       ((TranslateTransform)earR.RenderTransform).X = x + w;
@@ -1155,7 +1221,7 @@ namespace Island {
       hoverTimer.Stop();
       bool want = mouseIn || typing || talking;
       if (want == expandedOn) return;
-      hoverTimer.Interval = TimeSpan.FromMilliseconds(want ? 60 : 220);
+      hoverTimer.Interval = TimeSpan.FromMilliseconds(want ? (floating && !typing && !talking ? 450 : 60) : 220);   // sur la barre d'adresse : pas d'ouverture au simple passage de la souris
       hoverTimer.Start();
     }
     void SetExpanded(bool on) {
@@ -1360,6 +1426,7 @@ namespace Island {
       if (tickN % 5 == 1) Safe("minuteur", UpdateTimer);
       if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
       if (tickN % 10 == 3) Safe("appareils", WatchDevices);
+      if (tickN % 3 == 2) Safe("chrome", CheckBrowser);
       if (tickN % 20 == 7) Safe("état du PC", PollSys);
       Safe("panneau", SideTick);
       Safe("anneaux", AnimateSys);
@@ -4361,7 +4428,7 @@ $workers = @(
 
 try {
   $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
-  $cfg = @{ logPath = [string]$LogPath; accent = $DefaultAccent; timerColor = $TimerColor; chargeColor = $ChargeColor; hideFullscreen = [bool]$HideInFullscreen; version = $Version }
+  $cfg = @{ logPath = [string]$LogPath; accent = $DefaultAccent; timerColor = $TimerColor; chargeColor = $ChargeColor; hideFullscreen = [bool]$HideInFullscreen; chromeShift = [bool]$ChromeAdresse; chromeOffset = [double]$ChromeDecalage; version = $Version }
   $app = New-Object Island.App($win, $sync, $cfg)
 } catch {
   $sync.stop = $true
