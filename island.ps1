@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.46'
+$Version = '4.47'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -12,7 +12,7 @@ $TimerColor       = "#FF9F0A"
 $ChargeColor      = "#30D158"
 $HideInFullscreen = $true
 $ChromeAdresse    = $true      # Chrome / Edge au premier plan : la pilule descend sur la barre d'adresse (sous les onglets)
-$ChromeDecalage   = 37         # hauteur des onglets quand Chrome est agrandi (à ajuster dans config.ps1 si besoin)
+$ChromeDecalage   = 46         # haut de la pilule sous le bord de Chrome agrandi (4.47 : 37 → 46, centrée sur la barre d'adresse) (à ajuster dans config.ps1 si besoin)
 # ------------------------------
 
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -1106,7 +1106,7 @@ namespace Island {
         int px = (int)Math.Round((win.Left + win.Width / 2) * sx), py = (int)Math.Round((wa.Top + 17) * sy);
         int t; bool zoomed;
         if (Win.BrowserUnder(hwnd, px, py, out t, out zoomed)) {
-          double off = Num(G(cfg, "chromeOffset")); if (off <= 0) off = 37;
+          double off = Num(G(cfg, "chromeOffset")); if (off <= 0) off = 46;
           double winTop = zoomed ? wa.Top : Math.Max(wa.Top, t / sy);
           want = true; top = winTop + off + (zoomed ? 0 : 8);
         }
