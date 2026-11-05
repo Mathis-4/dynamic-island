@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.37'
+$Version = '4.38'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -2516,7 +2516,9 @@ namespace Island {
       }
       bool fresh = clipAt != DateTime.MinValue && (DateTime.Now - clipAt).TotalMinutes < 15;
       if (!fresh && clipAt != DateTime.MinValue) ClearClip();
-      sideHandle.Background = fresh ? Br(Color.FromArgb(0xE6, a.R, a.G, a.B)) : Br("#59FFFFFF");
+      // couleur de l'album adoucie (mêlée de gris, à demi transparente) : un indice, pas un néon
+      Color m = Color.FromArgb(0x9C, (byte)(a.R * 0.4 + 0xA0 * 0.6), (byte)(a.G * 0.4 + 0xA0 * 0.6), (byte)(a.B * 0.4 + 0xA0 * 0.6));
+      sideHandle.Background = fresh ? Br(m) : Br("#59FFFFFF");
       Hashtable n = G(sync, "nox") as Hashtable;
       bool ok = n != null && Bool(G(n, "ok"));
       sideState.Text = ok ? (Bool(G(n, "occupe")) || Bool(G(n, "busy")) ? "au travail" : "en ligne") : "injoignable";
@@ -2728,7 +2730,7 @@ namespace Island {
       // la poignée prend la couleur un instant pour signaler qu'il y a quelque chose
       if (!sideOpen) {
         sideHandle.BeginAnimation(FrameworkElement.WidthProperty, null);
-        DoubleAnimation w = new DoubleAnimation(4, 7, TimeSpan.FromMilliseconds(260)); w.AutoReverse = true; w.RepeatBehavior = new RepeatBehavior(2);
+        DoubleAnimation w = new DoubleAnimation(4, 6, TimeSpan.FromMilliseconds(320)); w.AutoReverse = true;
         sideHandle.BeginAnimation(FrameworkElement.WidthProperty, w);
       }
     }
