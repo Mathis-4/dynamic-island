@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.34'
+$Version = '4.35'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -669,6 +669,141 @@ namespace Island {
   // ===================================================================
   //  L'application : tout l'affichage tourne ici, en code compilé
   // ===================================================================
+  // ---------------- état du PC (processeur, mémoire, carte graphique, disque, réseau) ----------------
+  public class SysInfo {
+    public double Cpu = -1, Ram = -1, RamUsed, RamTotal, Gpu = -1, Disk = -1, DiskFree, Down = -1, Up = -1, TopGb;
+    public string Top = "";
+    public DateTime At = DateTime.Now;
+  }
+  public static class SysMon {
+    [DllImport("kernel32.dll")] static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+    [StructLayout(LayoutKind.Sequential)] class MemStat { public uint dwLength = 64; public uint load; public ulong totalPhys, availPhys, totalPage, availPage, totalVirt, availVirt, availExt; }
+    [DllImport("kernel32.dll")] static extern bool GlobalMemoryStatusEx([In, Out] MemStat m);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] static extern uint PdhOpenQuery(string src, IntPtr user, out IntPtr q);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] static extern uint PdhAddEnglishCounter(IntPtr q, string path, IntPtr user, out IntPtr c);
+    [DllImport("pdh.dll")] static extern uint PdhCollectQueryData(IntPtr q);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] static extern uint PdhGetFormattedCounterArray(IntPtr c, uint fmt, ref uint size, out uint count, IntPtr buf);
+
+    static readonly object gate = new object();
+    static long lIdle, lKern, lUser;
+    static IntPtr gq, gc; static bool gpuInit, gpuOk; static DateTime lastGpu = DateTime.MinValue;
+    static long lRx, lTx; static DateTime lastNet = DateTime.MinValue;
+
+    public static SysInfo Sample(bool full) {
+      lock (gate) {
+        SysInfo s = new SysInfo();
+        try {
+          long i, k, u;
+          if (GetSystemTimes(out i, out k, out u)) {
+            long di = i - lIdle, dt = (k - lKern) + (u - lUser);   // le temps « noyau » contient le temps d'inactivité
+            if (lKern != 0 && dt > 0) s.Cpu = Math.Max(0, Math.Min(100, 100.0 * (dt - di) / dt));
+            lIdle = i; lKern = k; lUser = u;
+          }
+        } catch { }
+        try {
+          MemStat m = new MemStat();
+          if (GlobalMemoryStatusEx(m)) {
+            s.Ram = m.load; s.RamTotal = m.totalPhys / 1073741824.0; s.RamUsed = (m.totalPhys - m.availPhys) / 1073741824.0;
+          }
+        } catch { }
+        if (!full) return s;
+        try { s.Gpu = Gpu(); } catch { s.Gpu = -1; }
+        try {
+          System.IO.DriveInfo d = new System.IO.DriveInfo(System.IO.Path.GetPathRoot(Environment.SystemDirectory));
+          if (d.IsReady && d.TotalSize > 0) { s.Disk = 100.0 * (d.TotalSize - d.AvailableFreeSpace) / d.TotalSize; s.DiskFree = d.AvailableFreeSpace / 1073741824.0; }
+        } catch { }
+        try { Net(s); } catch { }
+        try { s.Top = TopProc(out s.TopGb); } catch { }
+        return s;
+      }
+    }
+
+    // carte graphique : même calcul que le Gestionnaire des tâches (somme par moteur, puis le moteur le plus chargé)
+    static double Gpu() {
+      if (!gpuInit) {
+        gpuInit = true;
+        if (PdhOpenQuery(null, IntPtr.Zero, out gq) == 0 && PdhAddEnglishCounter(gq, "\\GPU Engine(*)\\Utilization Percentage", IntPtr.Zero, out gc) == 0) {
+          PdhCollectQueryData(gq); gpuOk = true; lastGpu = DateTime.Now;
+        }
+        return -1;
+      }
+      if (!gpuOk) return -1;
+      bool stale = (DateTime.Now - lastGpu).TotalSeconds > 6;   // mesure trop ancienne : on attend la suivante
+      lastGpu = DateTime.Now;
+      if (PdhCollectQueryData(gq) != 0 || stale) return -1;
+      uint size = 0, n;
+      uint r = PdhGetFormattedCounterArray(gc, 0x200, ref size, out n, IntPtr.Zero);
+      if (r != 0x800007D2 || size == 0) return 0;
+      IntPtr buf = Marshal.AllocHGlobal((int)size);
+      try {
+        r = PdhGetFormattedCounterArray(gc, 0x200, ref size, out n, buf);
+        if (r != 0) return -1;
+        Dictionary<string, double> sums = new Dictionary<string, double>();
+        for (int j = 0; j < n; j++) {
+          IntPtr it = new IntPtr(buf.ToInt64() + j * 24L);   // PDH_FMT_COUNTERVALUE_ITEM : nom, état (+8), valeur (+16)
+          string name = Marshal.PtrToStringUni(Marshal.ReadIntPtr(it));
+          int st = Marshal.ReadInt32(it, 8);
+          if (st != 0 && st != 1) continue;
+          double v = BitConverter.Int64BitsToDouble(Marshal.ReadInt64(it, 16));
+          if (double.IsNaN(v) || v < 0) continue;
+          int p = name == null ? -1 : name.IndexOf("_luid_");
+          string key = p >= 0 ? name.Substring(p) : (name ?? "");
+          double cur; sums.TryGetValue(key, out cur); sums[key] = cur + v;
+        }
+        double max = 0; foreach (double v in sums.Values) if (v > max) max = v;
+        return Math.Min(100, max);
+      } finally { Marshal.FreeHGlobal(buf); }
+    }
+
+    static void Net(SysInfo s) {
+      long rx = 0, tx = 0;
+      foreach (System.Net.NetworkInformation.NetworkInterface ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()) {
+        if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+        System.Net.NetworkInformation.NetworkInterfaceType t = ni.NetworkInterfaceType;
+        if (t != System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 && t != System.Net.NetworkInformation.NetworkInterfaceType.Ethernet && t != System.Net.NetworkInformation.NetworkInterfaceType.GigabitEthernet) continue;
+        string desc = (ni.Description ?? "").ToLowerInvariant();
+        if (desc.Contains("virtual") || desc.Contains("hyper-v") || desc.Contains("tailscale") || desc.Contains("wintun") || desc.Contains("vpn")) continue;
+        try { System.Net.NetworkInformation.IPInterfaceStatistics st = ni.GetIPStatistics(); rx += st.BytesReceived; tx += st.BytesSent; } catch { }
+      }
+      DateTime now = DateTime.Now;
+      double sec = (now - lastNet).TotalSeconds;
+      if (sec > 0.5 && sec < 6 && rx >= lRx && tx >= lTx) { s.Down = (rx - lRx) / sec; s.Up = (tx - lTx) / sec; }
+      lRx = rx; lTx = tx; lastNet = now;
+    }
+
+    static string TopProc(out double gb) {
+      Dictionary<string, long> m = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+      foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcesses()) {
+        try {
+          string n = p.ProcessName;
+          if (n != "Idle" && n != "System") { long cur; m.TryGetValue(n, out cur); m[n] = cur + p.WorkingSet64; }
+        } catch { } finally { p.Dispose(); }
+      }
+      string best = ""; long bv = 0;
+      foreach (KeyValuePair<string, long> kv in m) if (kv.Value > bv) { bv = kv.Value; best = kv.Key; }
+      gb = bv / 1073741824.0;
+      return Friendly(best);
+    }
+    public static string Friendly(string n) {
+      switch ((n ?? "").ToLowerInvariant()) {
+        case "": return "";
+        case "msedge": return "Edge";
+        case "chrome": return "Chrome";
+        case "firefox": return "Firefox";
+        case "code": return "VS Code";
+        case "explorer": return "Explorateur";
+        case "memory compression": return "Compression mémoire";
+        case "vmmem": case "vmmemwsl": return "Machine virtuelle";
+        case "msmpeng": return "Antivirus";
+        case "dwm": return "Affichage Windows";
+        case "searchhost": return "Recherche Windows";
+        case "claude": return "Claude";
+        case "powershell": return "PowerShell";
+        default: return char.ToUpper(n[0]) + n.Substring(1);
+      }
+    }
+  }
+
   public class App {
     Window win; Hashtable sync; Hashtable cfg;
     Canvas root, clipHost; Path shape, earL, earR; Border bubble;
@@ -860,7 +995,7 @@ namespace Island {
       tick = new DispatcherTimer(DispatcherPriority.Background, win.Dispatcher);
       tick.Interval = TimeSpan.FromMilliseconds(100);
       tick.Tick += delegate { Safe("cycle", Tick); };
-      UpdateBattery(); UpdateTimer(); Safe("raccourcis", BuildTools); Safe("maison", delegate { UpdateHouse(null); }); ShowPage("PgNox", 0);
+      UpdateBattery(); UpdateTimer(); Safe("raccourcis", BuildTools); Safe("état du PC", BuildSys); Safe("maison", delegate { UpdateHouse(null); }); ShowPage("PgNox", 0);
       tick.Start();
       Log("interface prête (code compilé)");
     }
@@ -1223,6 +1358,8 @@ namespace Island {
       if (tickN % 5 == 1) Safe("minuteur", UpdateTimer);
       if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
       if (tickN % 10 == 3) Safe("appareils", WatchDevices);
+      if (tickN % 20 == 7) Safe("état du PC", PollSys);
+      Safe("anneaux", AnimateSys);
       if (tickN % 10 == 1) {
         Safe("batterie", delegate { if (!ringIsTimer) UpdateBattery(); });
         Safe("nox", UpdateNox);
@@ -2119,7 +2256,7 @@ namespace Island {
       for (int i = vks.Length - 1; i >= 0; i--) keybd_event(vks[i], 0, 2, IntPtr.Zero);
     }
     void BuildTools() {
-      Panel g = E<Panel>("PgTools");
+      Panel g = E<Panel>("ToolsGrid");
       if (g.Children.Count > 0) return;
       object[][] tools = {
         new object[] { "\uE924", "Capture", new Action(delegate { Run("ms-screenclip:"); }) },
@@ -2146,6 +2283,106 @@ namespace Island {
       }
     }
     void Run(string what) { System.Diagnostics.Process.Start(what); }
+
+    // ---------------- État du PC (au-dessus des raccourcis) ----------------
+    string[] sysNames = { "Processeur", "Mémoire", "Graphique", "Disque" };
+    double[] sysTarget = { 0, 0, 0, 0 }, sysShown = { 0, 0, 0, 0 };
+    Path[] sysArc = new Path[4]; TextBlock[] sysPct = new TextBlock[4], sysSub = new TextBlock[4];
+    bool sysBusy; string sysTopName = ""; DateTime sysTopAt = DateTime.MinValue;
+    DateTime? ramHighSince, cpuHighSince; DateTime nextSysAlert = DateTime.MinValue;
+    void BuildSys() {
+      Panel g = E<Panel>("SysGrid");
+      if (g.Children.Count > 0) return;
+      for (int i = 0; i < 4; i++) {
+        StackPanel sp = new StackPanel(); sp.HorizontalAlignment = HorizontalAlignment.Center;
+        Grid ring = new Grid(); ring.Width = 48; ring.Height = 48; ring.HorizontalAlignment = HorizontalAlignment.Center;
+        Ellipse bg = new Ellipse(); bg.Stroke = Br("#1FFFFFFF"); bg.StrokeThickness = 4;
+        Path arc = new Path(); arc.StrokeThickness = 4; arc.StrokeStartLineCap = PenLineCap.Round; arc.StrokeEndLineCap = PenLineCap.Round; arc.Stroke = Br("#F4EFE6");
+        TextBlock pct = new TextBlock(); pct.Text = "…"; pct.FontSize = 12.5; pct.FontFamily = new FontFamily("Segoe UI Variable Display Semibold, Segoe UI Semibold");
+        pct.HorizontalAlignment = HorizontalAlignment.Center; pct.VerticalAlignment = VerticalAlignment.Center;
+        ring.Children.Add(bg); ring.Children.Add(arc); ring.Children.Add(pct);
+        TextBlock lb = new TextBlock(); lb.Text = sysNames[i]; lb.FontSize = 11; lb.Foreground = Br("#C7C7CC"); lb.HorizontalAlignment = HorizontalAlignment.Center; lb.Margin = new Thickness(0, 5, 0, 0);
+        TextBlock sub = new TextBlock(); sub.FontSize = 10; sub.Foreground = Br("#8E8E93"); sub.HorizontalAlignment = HorizontalAlignment.Center;
+        sp.Children.Add(ring); sp.Children.Add(lb); sp.Children.Add(sub);
+        Border cell = new Border(); cell.Child = sp; cell.Background = Brushes.Transparent; cell.Cursor = Cursors.Hand;
+        cell.ToolTip = "Ouvrir le Gestionnaire des tâches";
+        cell.MouseLeftButtonUp += delegate { try { Run("taskmgr.exe"); } catch (Exception ex) { Log("gestionnaire : " + ex.Message); } };
+        g.Children.Add(cell);
+        sysArc[i] = arc; sysPct[i] = pct; sysSub[i] = sub;
+      }
+    }
+    // toutes les 2 s : processeur et mémoire (léger) ; le reste seulement quand la page est ouverte
+    void PollSys() {
+      if (sysBusy) return;
+      sysBusy = true;
+      bool full = expandedOn && page == "PgTools";
+      Task.Run(new Action(delegate {
+        SysInfo s = null;
+        try { s = SysMon.Sample(full); } catch (Exception ex) { win.Dispatcher.BeginInvoke(new Action(delegate { Log("état du PC : " + ex.Message); })); }
+        win.Dispatcher.BeginInvoke(new Action(delegate { sysBusy = false; if (s != null) Safe("état du PC", delegate { OnSys(s, full); }); }));
+      }));
+    }
+    void OnSys(SysInfo s, bool full) {
+      DateTime now = DateTime.Now;
+      if (s.Top.Length > 0) { sysTopName = s.Top; sysTopAt = now; }
+      // alerte discrète si la mémoire ou le processeur restent saturés (jamais en plein écran)
+      if (hiddenFs) { ramHighSince = null; cpuHighSince = null; }
+      else {
+        if (s.Ram >= 90) { if (!ramHighSince.HasValue) ramHighSince = now; } else ramHighSince = null;
+        if (s.Cpu >= 95) { if (!cpuHighSince.HasValue) cpuHighSince = now; } else cpuHighSince = null;
+        bool ramAlert = ramHighSince.HasValue && (now - ramHighSince.Value).TotalSeconds >= 30;
+        bool cpuAlert = cpuHighSince.HasValue && (now - cpuHighSince.Value).TotalSeconds >= 30;
+        if ((ramAlert || cpuAlert) && now >= nextSysAlert && !expandedOn) {
+          nextSysAlert = now.AddMinutes(15);
+          string who = (now - sysTopAt).TotalMinutes < 5 && sysTopName.Length > 0 ? " · " + sysTopName : "";
+          if (ramAlert) ShowToast("", "Mémoire presque pleine" + who, string.Format("{0:0} %", s.Ram), Rgb("#FF9F0A"), -1, 3500);
+          else ShowToast("", "Processeur très chargé", string.Format("{0:0} %", s.Cpu), Rgb("#FF9F0A"), -1, 3500);
+          Refresh();
+        }
+      }
+      if (!full || sysArc[0] == null) return;
+      double[] v = { s.Cpu, s.Ram, s.Gpu, s.Disk };
+      for (int i = 0; i < 4; i++) {
+        if (v[i] < 0) { sysPct[i].Text = "…"; continue; }
+        sysTarget[i] = v[i] / 100.0;
+        sysPct[i].Text = string.Format("{0:0}", v[i]) + "%";
+      }
+      if (s.RamTotal > 0) sysSub[1].Text = string.Format(fr, "{0:0.0} / {1:0} Go", s.RamUsed, s.RamTotal);
+      if (s.DiskFree > 0) sysSub[3].Text = string.Format(fr, "{0:0} Go libres", s.DiskFree);
+      sysSub[0].Text = s.Cpu >= 0 ? (s.Cpu >= 75 ? "chargé" : s.Cpu >= 30 ? "actif" : "calme") : "";
+      sysSub[2].Text = s.Gpu >= 0 ? (s.Gpu >= 75 ? "chargée" : s.Gpu >= 30 ? "active" : "calme") : "";
+      string line = "";
+      if (s.Down >= 0) line = "↓ " + Speed(s.Down) + "   ↑ " + Speed(s.Up);
+      if (s.Top.Length > 0) line += (line.Length > 0 ? "     ·     " : "") + "Plus gourmand : " + s.Top + string.Format(fr, " {0:0.0} Go", s.TopGb);
+      if (line.Length > 0) E<TextBlock>("SysLine").Text = line;
+    }
+    string Speed(double bps) {
+      if (bps >= 1048576) return string.Format(fr, "{0:0.0} Mo/s", bps / 1048576);
+      return string.Format(fr, "{0:0} Ko/s", bps / 1024);
+    }
+    // anneaux : glissement doux vers la nouvelle valeur
+    void AnimateSys() {
+      if (!(expandedOn && page == "PgTools") || sysArc[0] == null) return;
+      for (int i = 0; i < 4; i++) {
+        double d = sysTarget[i] - sysShown[i];
+        if (Math.Abs(d) < 0.002 && sysArc[i].Data != null) continue;
+        sysShown[i] += d * 0.3;
+        double f = Math.Max(0, Math.Min(0.9999, sysShown[i]));
+        Color c = sysTarget[i] >= 0.9 ? Rgb("#FF453A") : sysTarget[i] >= 0.75 ? Rgb("#FF9F0A") : (Playing() ? accent : Rgb("#F4EFE6"));
+        SolidColorBrush cur = sysArc[i].Stroke as SolidColorBrush;
+        if (cur == null || cur.Color != c) sysArc[i].Stroke = Br(c);
+        sysArc[i].Data = Arc(f, 48, 4);
+      }
+    }
+    static Geometry Arc(double f, double size, double th) {
+      if (f < 0.005) return Geometry.Empty;
+      double r = (size - th) / 2, c = size / 2, a = f * 2 * Math.PI;
+      Point start = new Point(c, c - r), end = new Point(c + r * Math.Sin(a), c - r * Math.Cos(a));
+      PathFigure fig = new PathFigure(); fig.StartPoint = start; fig.IsClosed = false;
+      fig.Segments.Add(new ArcSegment(end, new Size(r, r), 0, f > 0.5, SweepDirection.Clockwise, true));
+      PathGeometry g = new PathGeometry(); g.Figures.Add(fig); g.Freeze();
+      return g;
+    }
 
     // ---------------- Agenda ----------------
     List<Hashtable> week = new List<Hashtable>();
@@ -3136,7 +3373,11 @@ $workers = @(
             </StackPanel>
 
             <!-- Raccourcis Windows -->
-            <UniformGrid x:Name="PgTools" Visibility="Collapsed" Columns="4"/>
+            <StackPanel x:Name="PgTools" Visibility="Collapsed">
+              <UniformGrid x:Name="SysGrid" Columns="4" Margin="0,0,0,6"/>
+              <TextBlock x:Name="SysLine" Text=" " FontSize="11" Foreground="#8E8E93" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,0,12"/>
+              <UniformGrid x:Name="ToolsGrid" Columns="4"/>
+            </StackPanel>
 
             <!-- Agenda : les 7 prochains jours, puis les rendez-vous du jour choisi -->
             <StackPanel x:Name="PgAgenda" Visibility="Collapsed">
