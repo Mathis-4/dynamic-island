@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.47'
+$Version = '4.48'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -208,6 +208,14 @@ namespace Island {
     [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
+    // v4.48 : une vraie fenêtre de navigateur (avec onglets) a un titre « … - Google Chrome » / « … - Microsoft Edge » ;
+    // une appli installée (appli Nox, YouTube…) n'a ni onglets ni barre d'adresse : pas de bascule
+    static bool TabbedTitle(IntPtr h) {
+      System.Text.StringBuilder t = new System.Text.StringBuilder(512); GetWindowText(h, t, 512);
+      string s = t.ToString().Replace("\u200B", "").TrimEnd();
+      return s.EndsWith("Google Chrome", StringComparison.OrdinalIgnoreCase) || s.EndsWith("Microsoft Edge", StringComparison.OrdinalIgnoreCase);
+    }
     static IntPtr lastBrowserHwnd = IntPtr.Zero; static bool lastBrowserIs;
     // Chrome / Edge au premier plan, qui couvre le point (x, y) en pixels physiques : vrai + haut de la fenêtre et agrandie ou non
     public static bool BrowserUnder(IntPtr self, int x, int y, out int top, out bool zoomed) {
@@ -225,7 +233,7 @@ namespace Island {
           } catch { }
         }
       }
-      if (!lastBrowserIs) return false;
+      if (!lastBrowserIs || !TabbedTitle(h)) return false;
       RECT r; if (!GetWindowRect(h, out r)) return false;
       zoomed = IsZoomed(h);
       if (r.L > x || r.R < x || r.T > y || r.B < y + 200) return false;
