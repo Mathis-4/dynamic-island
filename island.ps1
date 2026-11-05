@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.38'
+$Version = '4.39'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -2285,6 +2285,220 @@ namespace Island {
     }
     void Run(string what) { System.Diagnostics.Process.Start(what); }
 
+    // ---------- « Maintenant », « Que faire ici ? », téléchargements, aide à l'écriture (v4.39) ----------
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out Win.RECT r);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int w, int h);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+
+    Border nowRow, helpBtn, dlCard; TextBlock nowText, nowSub, helpSub, dlName, dlKind; WrapPanel nowChips, dlChips; TextBlock dlLabel;
+    IntPtr fgAtOpen = IntPtr.Zero; string fgTitle = "";
+    bool copyMode; DateTime ignoreClipUntil = DateTime.MinValue;
+    System.IO.FileSystemWatcher dlWatch; string dlPending = "", dlShown = ""; DateTime dlPendingAt = DateTime.MinValue, dlShownAt = DateTime.MinValue;
+    string nowKey = "";
+
+    void BuildSideExtras(StackPanel col) {
+      // ligne « Maintenant » (prochain rendez-vous), sous l'en-tête
+      nowRow = new Border(); nowRow.CornerRadius = new CornerRadius(14); nowRow.Background = Br("#14FFFFFF"); nowRow.Padding = new Thickness(12, 9, 12, 9);
+      nowRow.Margin = new Thickness(0, 0, 0, 12); nowRow.Visibility = Visibility.Collapsed;
+      StackPanel ns = new StackPanel(); nowRow.Child = ns;
+      nowText = new TextBlock(); nowText.FontSize = 13; nowText.FontFamily = new FontFamily("Segoe UI Variable Text Semibold, Segoe UI Semibold"); nowText.TextTrimming = TextTrimming.CharacterEllipsis;
+      nowSub = new TextBlock(); nowSub.FontSize = 11.5; nowSub.Foreground = Br("#AEAEB2"); nowSub.TextTrimming = TextTrimming.CharacterEllipsis; nowSub.Margin = new Thickness(0, 1, 0, 0);
+      nowChips = new WrapPanel(); nowChips.Margin = new Thickness(0, 8, 0, -6); nowChips.Visibility = Visibility.Collapsed;
+      ns.Children.Add(nowText); ns.Children.Add(nowSub); ns.Children.Add(nowChips);
+      col.Children.Insert(1, nowRow);
+    }
+    void BuildHelpButton(StackPanel col) {
+      // « Que faire ici ? » : Nox regarde la fenêtre ouverte et explique
+      helpBtn = new Border(); helpBtn.CornerRadius = new CornerRadius(16); helpBtn.Background = Br("#14FFFFFF"); helpBtn.Padding = new Thickness(12, 10, 12, 10);
+      helpBtn.Margin = new Thickness(0, 10, 0, 0); helpBtn.Cursor = Cursors.Hand;
+      DockPanel hd = new DockPanel(); helpBtn.Child = hd;
+      Border hi = new Border(); hi.Width = 30; hi.Height = 30; hi.CornerRadius = new CornerRadius(9); hi.Background = Br("#1FFFFFFF"); hi.Margin = new Thickness(0, 0, 10, 0);
+      TextBlock hg = new TextBlock(); hg.Text = ""; hg.FontFamily = new FontFamily("Segoe Fluent Icons"); hg.FontSize = 14;
+      hg.HorizontalAlignment = HorizontalAlignment.Center; hg.VerticalAlignment = VerticalAlignment.Center; hi.Child = hg;
+      DockPanel.SetDock(hi, Dock.Left); hd.Children.Add(hi);
+      StackPanel ht = new StackPanel(); ht.VerticalAlignment = VerticalAlignment.Center;
+      TextBlock h1 = new TextBlock(); h1.Text = "Que faire ici ?"; h1.FontSize = 13; h1.FontFamily = new FontFamily("Segoe UI Variable Text Semibold, Segoe UI Semibold");
+      helpSub = new TextBlock(); helpSub.FontSize = 11; helpSub.Foreground = Br("#8E8E93"); helpSub.TextTrimming = TextTrimming.CharacterEllipsis;
+      ht.Children.Add(h1); ht.Children.Add(helpSub); hd.Children.Add(ht);
+      helpBtn.MouseEnter += delegate { helpBtn.Background = Br("#22FFFFFF"); };
+      helpBtn.MouseLeave += delegate { helpBtn.Background = Br("#14FFFFFF"); };
+      helpBtn.MouseLeftButtonUp += delegate { Safe("que faire ici", ExplainWindow); };
+      col.Children.Add(helpBtn);
+    }
+    void BuildDownloadCard(StackPanel col) {
+      dlLabel = SideLabel("Téléchargé"); dlLabel.Visibility = Visibility.Collapsed;
+      col.Children.Add(dlLabel);
+      dlCard = new Border(); dlCard.CornerRadius = new CornerRadius(16); dlCard.Background = Br("#14FFFFFF"); dlCard.Padding = new Thickness(12); dlCard.Visibility = Visibility.Collapsed;
+      StackPanel dc = new StackPanel(); dlCard.Child = dc;
+      DockPanel dr = new DockPanel();
+      Border di = new Border(); di.Width = 36; di.Height = 36; di.CornerRadius = new CornerRadius(10); di.Background = Br("#1FFFFFFF"); di.Margin = new Thickness(0, 0, 10, 0);
+      TextBlock dg = new TextBlock(); dg.Text = ""; dg.FontFamily = new FontFamily("Segoe Fluent Icons"); dg.FontSize = 15;
+      dg.HorizontalAlignment = HorizontalAlignment.Center; dg.VerticalAlignment = VerticalAlignment.Center; di.Child = dg;
+      DockPanel.SetDock(di, Dock.Left); dr.Children.Add(di);
+      StackPanel dt = new StackPanel(); dt.VerticalAlignment = VerticalAlignment.Center;
+      dlKind = new TextBlock(); dlKind.FontSize = 11; dlKind.Foreground = Br("#8E8E93");
+      dlName = new TextBlock(); dlName.FontSize = 12.5; dlName.TextTrimming = TextTrimming.CharacterEllipsis;
+      dt.Children.Add(dlKind); dt.Children.Add(dlName); dr.Children.Add(dt);
+      dc.Children.Add(dr);
+      dlChips = new WrapPanel(); dlChips.Margin = new Thickness(0, 10, 0, -6);
+      dc.Children.Add(dlChips);
+      col.Children.Add(dlCard);
+    }
+
+    // ---- fenêtre au premier plan ----
+    void NoteForeground() {
+      IntPtr h = GetForegroundWindow();
+      fgAtOpen = IntPtr.Zero; fgTitle = "";
+      if (h == IntPtr.Zero || h == hwnd || h == sideHwnd || IsIconic(h)) return;
+      System.Text.StringBuilder sb = new System.Text.StringBuilder(256);
+      GetClassName(h, sb, 256);
+      string c = sb.ToString();
+      if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd") return;
+      sb.Clear(); GetWindowText(h, sb, 256);
+      fgAtOpen = h; fgTitle = sb.ToString().Trim();
+    }
+    BitmapSource CaptureWindow(IntPtr h) {
+      Win.RECT r;
+      if (!GetWindowRect(h, out r)) return null;
+      int w = r.R - r.L, hh = r.B - r.T;
+      if (w < 60 || hh < 60) return null;
+      IntPtr sdc = GetDC(IntPtr.Zero);
+      IntPtr mdc = CreateCompatibleDC(sdc);
+      IntPtr bmp = CreateCompatibleBitmap(sdc, w, hh);
+      IntPtr old = SelectObject(mdc, bmp);
+      try {
+        if (!PrintWindow(h, mdc, 2)) return null;   // 2 = tout le contenu, même caché sous une autre fenêtre
+        BitmapSource src = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(bmp, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+        src.Freeze();
+        return src;
+      } finally { SelectObject(mdc, old); DeleteObject(bmp); DeleteDC(mdc); ReleaseDC(IntPtr.Zero, sdc); }
+    }
+    void ExplainWindow() {
+      if (fgAtOpen == IntPtr.Zero) { ShowReply("Aucune fenêtre", "Ouvre la fenêtre à expliquer, puis reviens sur le panneau.", null); return; }
+      BitmapSource shot = CaptureWindow(fgAtOpen);
+      if (shot == null) { ShowReply("Capture impossible", "Cette fenêtre ne se laisse pas capturer. Essaie une capture avec Win+Maj+S.", null); return; }
+      string path = SaveJpeg(shot, "nox_fenetre.jpg");
+      Log("que faire ici : capture envoyée");   // jamais le titre ni le contenu
+      SendFile(path, "Voici une capture de la fenêtre que j'ai sous les yeux. Explique-moi simplement ce que je vois et dis-moi ce que je dois faire, étape par étape si besoin.");
+    }
+
+    // ---- « Maintenant » : prochain rendez-vous (aujourd'hui ou dans les 18 h) ----
+    void UpdateNow() {
+      DateTime now = DateTime.Now, best = DateTime.MaxValue, bestEnd = DateTime.MinValue;
+      Hashtable pick = null; bool running = false;
+      foreach (Hashtable d in week) {
+        string date = Str(G(d, "date"));
+        foreach (Hashtable ev in EventsOf(d)) {
+          if (Bool(G(ev, "journee"))) continue;
+          DateTime st, en;
+          if (!DateTime.TryParseExact(date + " " + Str(G(ev, "debut")), "yyyy-MM-dd HH:mm", null, System.Globalization.DateTimeStyles.None, out st)) continue;
+          if (!DateTime.TryParseExact(date + " " + Str(G(ev, "fin")), "yyyy-MM-dd HH:mm", null, System.Globalization.DateTimeStyles.None, out en)) en = st.AddHours(1);
+          if (en <= now || (st - now).TotalHours > 18) continue;
+          bool run = st <= now;
+          if (pick == null || (run && !running) || (run == running && st < best)) { pick = ev; best = st; bestEnd = en; running = run; }
+        }
+      }
+      if (pick == null) { nowRow.Visibility = Visibility.Collapsed; nowKey = ""; return; }
+      string titre = Str(G(pick, "titre")), lieu = Str(G(pick, "lieu")), debut = Str(G(pick, "debut"));
+      TimeSpan left = best - now;
+      string when = running ? "En cours" : left.TotalMinutes < 1 ? "Maintenant" : left.TotalMinutes < 60 ? string.Format("Dans {0} min", (int)Math.Ceiling(left.TotalMinutes))
+        : string.Format("Dans {0} h {1:00}", (int)left.TotalHours, left.Minutes);
+      if (!running && best.Date > now.Date) when = "Demain " + best.ToString("HH:mm");
+      nowText.Text = when + " · " + titre;
+      nowSub.Text = (running ? "jusqu'à " + bestEnd.ToString("HH:mm") : best.ToString("HH:mm")) + (lieu.Length > 0 ? "  ·  " + lieu : "");
+      nowRow.Visibility = Visibility.Visible;
+      string key = titre + "|" + debut + "|" + lieu + "|" + running;
+      if (key == nowKey) return;
+      nowKey = key;
+      nowChips.Children.Clear();
+      if (lieu.Length > 0 && !running) {
+        string q = "Mon rendez-vous « " + titre + " » est à " + debut + (best.Date > now.Date ? " demain" : "") + ", à cette adresse : " + lieu + ". Combien de temps de trajet, et à quelle heure dois-je partir ?";
+        nowChips.Children.Add(SideChip("Quand partir ?", true, delegate { Safe("trajet", delegate { SideAct(q); }); }));
+      }
+      nowChips.Visibility = nowChips.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // ---- nouveaux fichiers dans Téléchargements ----
+    void StartDownloads() {
+      string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+      if (!System.IO.Directory.Exists(dir)) { Log("téléchargements : dossier introuvable"); return; }
+      dlWatch = new System.IO.FileSystemWatcher(dir);
+      dlWatch.IncludeSubdirectories = false;
+      dlWatch.NotifyFilter = System.IO.NotifyFilters.FileName;
+      dlWatch.Created += OnDownload; dlWatch.Renamed += OnDownload;
+      dlWatch.EnableRaisingEvents = true;
+    }
+    void OnDownload(object o, System.IO.FileSystemEventArgs e) {
+      string p = e.FullPath;
+      if (Array.IndexOf(DropTypes, System.IO.Path.GetExtension(p).ToLowerInvariant()) < 0) return;
+      win.Dispatcher.BeginInvoke(new Action(delegate { dlPending = p; dlPendingAt = DateTime.Now; }));
+    }
+    void CheckDownload() {
+      if (dlPending.Length > 0 && (DateTime.Now - dlPendingAt).TotalSeconds >= 1.5) {
+        string p = dlPending;
+        bool ready = false;
+        try {
+          if (System.IO.File.Exists(p)) {
+            using (System.IO.FileStream fs = new System.IO.FileStream(p, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read)) { ready = fs.Length > 0; }
+          } else dlPending = "";
+        } catch { }
+        if (ready) { dlPending = ""; ShowDownload(p); }
+        else if ((DateTime.Now - dlPendingAt).TotalSeconds > 120) dlPending = "";
+      }
+      if (dlShown.Length > 0 && (DateTime.Now - dlShownAt).TotalMinutes > 30) HideDownload();
+    }
+    void ShowDownload(string p) {
+      dlShown = p; dlShownAt = DateTime.Now;
+      bool pdf = System.IO.Path.GetExtension(p).ToLowerInvariant() == ".pdf";
+      dlKind.Text = (pdf ? "PDF" : "Image") + " téléchargé à " + DateTime.Now.ToString("HH:mm") + " · le classer ?";
+      dlName.Text = System.IO.Path.GetFileName(p);
+      dlChips.Children.Clear();
+      dlChips.Children.Add(SideChip("Ranger avec Nox", true, delegate { Safe("téléchargement", delegate { HideDownload(); SendFile(p, ""); }); }));
+      if (pdf) dlChips.Children.Add(SideChip("Résumer", false, delegate { Safe("téléchargement", delegate { HideDownload(); SendFile(p, "Résume ce document en quelques lignes : de quoi il s'agit, ce qu'on attend de moi et avant quand."); }); }));
+      dlChips.Children.Add(SideChip("Ignorer", false, delegate { HideDownload(); }));
+      dlLabel.Visibility = Visibility.Visible; dlCard.Visibility = Visibility.Visible;
+      Log("téléchargements : nouveau " + (pdf ? "PDF" : "fichier image"));
+      PulseHandle();
+    }
+    void HideDownload() { dlShown = ""; dlLabel.Visibility = Visibility.Collapsed; dlCard.Visibility = Visibility.Collapsed; }
+    void PulseHandle() {
+      if (sideOpen) return;
+      sideHandle.BeginAnimation(FrameworkElement.WidthProperty, null);
+      DoubleAnimation w = new DoubleAnimation(4, 6, TimeSpan.FromMilliseconds(320)); w.AutoReverse = true;
+      sideHandle.BeginAnimation(FrameworkElement.WidthProperty, w);
+    }
+
+    // ---- aide à l'écriture : la réponse se copie en un clic ----
+    static bool LooksEnglish(string t) {
+      int n = System.Text.RegularExpressions.Regex.Matches(" " + t.ToLowerInvariant() + " ", @"\b(the|and|you|your|is|are|to|of|for|with|this|that|have|will|please|thanks)\b").Count;
+      int fr = System.Text.RegularExpressions.Regex.Matches(" " + t.ToLowerInvariant() + " ", @"\b(le|la|les|et|vous|tu|est|pour|avec|une|des|merci|bonjour|je)\b").Count;
+      return n >= 2 && n > fr;
+    }
+    void AddWritingChips(List<string[]> ch, string t) {
+      string body = t.Length > 3500 ? t.Substring(0, 3500) : t;
+      const string only = " Réponds seulement avec le texte final, sans guillemets ni commentaire : « ";
+      ch.Add(new[] { "Corriger", "write:Corrige l'orthographe, la grammaire et la ponctuation de ce texte sans changer le ton ni le style." + only + body + " »" });
+      ch.Add(new[] { "Reformuler", "write:Reformule ce texte pour qu'il soit plus clair et plus fluide, en gardant le même ton et à peu près la même longueur." + only + body + " »" });
+      if (LooksEnglish(t)) ch.Add(new[] { "Traduire en français", "write:Traduis ce texte en français naturel." + only + body + " »" });
+      else ch.Add(new[] { "Traduire en anglais", "write:Traduis ce texte en anglais naturel." + only + body + " »" });
+    }
+    static string CleanCopy(string t) {
+      t = (t ?? "").Replace("**", "").Trim();
+      if (t.StartsWith("«") && t.EndsWith("»") && t.Length > 2) t = t.Substring(1, t.Length - 2).Trim();
+      if (t.StartsWith("\"") && t.EndsWith("\"") && t.Length > 2) t = t.Substring(1, t.Length - 2).Trim();
+      return t;
+    }
+
     // ================= Panneau latéral (bord droit de l'écran) =================
     // Tout ce qui arrive sur le PC (fichier déposé, presse-papiers) devient une action Nox en un clic.
     // Rien n'est envoyé sans clic ; le presse-papiers est analysé ici, sur le PC, et jamais écrit dans le journal.
@@ -2372,6 +2586,7 @@ namespace Island {
       dz.MouseLeave += delegate { if (!sideDragOver) dropRect.Fill = Br("#0DFFFFFF"); };
       dz.MouseLeftButtonUp += delegate { Safe("choisir un fichier", PickFile); };
       col.Children.Add(dz);
+      BuildHelpButton(col);
 
       // presse-papiers
       col.Children.Add(SideLabel("Presse-papiers"));
@@ -2399,6 +2614,8 @@ namespace Island {
       clipChips = new WrapPanel(); clipChips.Margin = new Thickness(0, 10, 0, -6); clipChips.Visibility = Visibility.Collapsed;
       cc.Children.Add(clipChips);
       col.Children.Add(clipCard);
+      BuildDownloadCard(col);
+      BuildSideExtras(col);
 
       // réponse de Nox (apparaît après une action)
       replyCard = new Border(); replyCard.CornerRadius = new CornerRadius(16); replyCard.Background = Br("#1AFFFFFF"); replyCard.Padding = new Thickness(12);
@@ -2429,6 +2646,7 @@ namespace Island {
       clipTimer.Tick += delegate { clipTimer.Stop(); Safe("presse-papiers", ReadClip); };
       PlaceSide();
       side.Show();
+      Safe("téléchargements", StartDownloads);
       Log("panneau latéral prêt");
     }
 
@@ -2450,6 +2668,10 @@ namespace Island {
       if (side == null || on == sideOpen) return;
       sideOpen = on;
       if (on) {
+        Safe("fenêtre", NoteForeground);
+        helpSub.Text = fgTitle.Length > 0 ? "Nox explique : " + fgTitle : "Ouvre d'abord une fenêtre";
+        helpBtn.Opacity = fgAtOpen == IntPtr.Zero ? 0.5 : 1;
+        Safe("maintenant", UpdateNow);
         Safe("panneau", SideRefresh);
         sidePanel.IsHitTestVisible = true;
         sideT.BeginAnimation(TranslateTransform.XProperty, null);
@@ -2502,6 +2724,8 @@ namespace Island {
         Rect cur = new Rect(side.Left, side.Top, side.Width, side.Height);
         if (Math.Abs(cur.Right - wa.Right) > 1 || Math.Abs(cur.Height - wa.Height) > 1) PlaceSide();
         Safe("panneau", SideRefresh);
+        Safe("téléchargements", CheckDownload);
+        if (sideOpen) Safe("maintenant", UpdateNow);
       }
       if (sideOpen && replyCard.Visibility == Visibility.Visible) Safe("réponse", SideReply);
     }
@@ -2514,8 +2738,8 @@ namespace Island {
         rimStop.Color = Color.FromArgb(0x55, a.R, a.G, a.B);
         glowStop.Color = Color.FromArgb(0x2A, a.R, a.G, a.B);
       }
-      bool fresh = clipAt != DateTime.MinValue && (DateTime.Now - clipAt).TotalMinutes < 15;
-      if (!fresh && clipAt != DateTime.MinValue) ClearClip();
+      bool fresh = (clipAt != DateTime.MinValue && (DateTime.Now - clipAt).TotalMinutes < 15) || dlShown.Length > 0;
+      if (clipAt != DateTime.MinValue && (DateTime.Now - clipAt).TotalMinutes >= 15) ClearClip();
       // couleur de l'album adoucie (mêlée de gris, à demi transparente) : un indice, pas un néon
       Color m = Color.FromArgb(0x9C, (byte)(a.R * 0.4 + 0xA0 * 0.6), (byte)(a.G * 0.4 + 0xA0 * 0.6), (byte)(a.B * 0.4 + 0xA0 * 0.6));
       sideHandle.Background = fresh ? Br(m) : Br("#59FFFFFF");
@@ -2598,6 +2822,7 @@ namespace Island {
 
     // ---------- presse-papiers ----------
     void ReadClip() {
+      if (DateTime.Now < ignoreClipUntil) return;   // c'est nous qui venons de copier la réponse de Nox
       System.Windows.IDataObject d = null;
       for (int i = 0; i < 3 && d == null; i++) {
         try { d = Clipboard.GetDataObject(); } catch { System.Threading.Thread.Sleep(40); }
@@ -2699,11 +2924,13 @@ namespace Island {
       // texte quelconque
       if (one.Length <= 160) {
         if (one.EndsWith("?")) ch.Add(new[] { "Demander à Nox", one });
-        ch.Add(new[] { "Créer une tâche", "Ajoute une tâche : " + one });
+        AddWritingChips(ch, t);
+        if (!one.EndsWith("?")) ch.Add(new[] { "Créer une tâche", "Ajoute une tâche : " + one });
         SetClip("Texte", "", one, null, ch); return;
       }
-      string body = t.Length > 4000 ? t.Substring(0, 4000) : t;
+      string body = t.Length > 3500 ? t.Substring(0, 3500) : t;
       ch.Add(new[] { "Résumer", "Résume ce texte en quelques lignes et dis-moi s'il y a quelque chose à faire : « " + body + " »" });
+      AddWritingChips(ch, t);
       SetClip("Texte long", "", one, null, ch);
     }
 
@@ -2719,7 +2946,7 @@ namespace Island {
       clipChips.Children.Clear();
       int i = 0;
       foreach (string[] c in chips) {
-        if (i >= 3) break;
+        if (i >= 5) break;
         string action = c[1];
         clipChips.Children.Add(SideChip(c[0], i == 0, delegate { Safe("action", delegate { SideAct(action); }); }));
         i++;
@@ -2728,11 +2955,7 @@ namespace Island {
       Log("presse-papiers : " + kind);   // le type seulement, jamais le contenu
       Safe("panneau", SideRefresh);
       // la poignée prend la couleur un instant pour signaler qu'il y a quelque chose
-      if (!sideOpen) {
-        sideHandle.BeginAnimation(FrameworkElement.WidthProperty, null);
-        DoubleAnimation w = new DoubleAnimation(4, 6, TimeSpan.FromMilliseconds(320)); w.AutoReverse = true;
-        sideHandle.BeginAnimation(FrameworkElement.WidthProperty, w);
-      }
+      PulseHandle();
     }
     void ClearClip() {
       clipAt = DateTime.MinValue; clipBitmap = null;
@@ -2763,8 +2986,11 @@ namespace Island {
         SendFile(path, a.Substring(4));
         return;
       }
+      bool write = a.StartsWith("write:");
+      if (write) a = a.Substring(6);
       if (!NoxReady()) return;
       NoxCmd("send:" + a);
+      copyMode = write;
       BeginWait(a.Length > 70 ? a.Substring(0, 70) + "…" : a);
     }
 
@@ -2792,6 +3018,12 @@ namespace Island {
     }
     void ReplyButton(string[] b) {
       // b = { libellé, type, valeur, id }
+      if (b[1] == "copy") {
+        ignoreClipUntil = DateTime.Now.AddSeconds(1.5);
+        try { Clipboard.SetText(CleanCopy(replyText.Text)); replyHead.Text = "Copié · colle-le où tu veux (Ctrl+V)"; } catch (Exception ex) { Log("copie : " + ex.Message); }
+        return;
+      }
+      copyMode = false;
       if (b[1] == "conf") NoxCmd("confirm:" + b[2] + ":" + b[3]);
       else NoxCmd("bouton:" + b[3] + "\u001f" + b[2]);
       Hashtable n = G(sync, "nox") as Hashtable;
@@ -2819,6 +3051,7 @@ namespace Island {
       if (key == replyKey) return;
       replyKey = key;
       List<string[]> btns = new List<string[]>();
+      if (copyMode && conf == null) btns.Add(new[] { "Copier", "copy", "", "" });
       if (conf != null) {
         btns.Add(new[] { "Confirmer", "conf", "1", Str(G(conf, "jeton")) });
         btns.Add(new[] { "Annuler", "conf", "0", Str(G(conf, "jeton")) });
