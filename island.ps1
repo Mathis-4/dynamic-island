@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.40'
+$Version = '4.41'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -1426,6 +1426,8 @@ namespace Island {
         string evTitle; double evMin;
         bool ev = NextEvent(now, out evTitle, out evMin) && !timerOn;
         Vis("CArtBox", music); Vis("CTitleBox", music); Vis("CEq", music);
+        Vis("CClockM", music);   // l'heure reste affichée pendant la musique (demande de Mathis)
+        if (music) E<TextBlock>("CClockM").Text = clock;
         // plus d'anneau de batterie (demande de Mathis) : l'anneau sert au minuteur et au prochain rendez-vous
         Vis("CRingBox", (timerOn || ev) && !music); Vis("CTimer", timerOn && !music); Vis("CEvent", ev && !music);
         Vis("CClock", !music && !timerOn && !ev); Vis("CEyes", true);   // les yeux de Nox restent aussi pendant la musique
@@ -2365,6 +2367,15 @@ namespace Island {
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
     [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
 
+    TextBox helpInput; TextBlock helpPh; bool sideTyping;
+    // pour écrire dans le panneau, il doit pouvoir prendre le clavier (sinon il ne vole jamais le focus)
+    void SideTyping(bool on) {
+      if (on == sideTyping || sideHwnd == IntPtr.Zero) return;
+      sideTyping = on;
+      Win.NoActivate(sideHwnd, !on);
+      if (on) { side.Activate(); helpInput.Focus(); }
+      else Keyboard.ClearFocus();
+    }
     Border nowRow, helpBtn, dlCard; TextBlock nowText, nowSub, helpSub, dlName, dlKind; WrapPanel nowChips, dlChips; TextBlock dlLabel;
     IntPtr fgAtOpen = IntPtr.Zero; string fgTitle = "";
     bool copyMode; DateTime ignoreClipUntil = DateTime.MinValue;
@@ -2385,8 +2396,8 @@ namespace Island {
     void BuildHelpButton(StackPanel col) {
       // « Que faire ici ? » : Nox regarde la fenêtre ouverte et explique
       helpBtn = new Border(); helpBtn.CornerRadius = new CornerRadius(16); helpBtn.Background = Br("#14FFFFFF"); helpBtn.Padding = new Thickness(12, 10, 12, 10);
-      helpBtn.Margin = new Thickness(0, 10, 0, 0); helpBtn.Cursor = Cursors.Hand;
-      DockPanel hd = new DockPanel(); helpBtn.Child = hd;
+      helpBtn.Margin = new Thickness(0, 10, 0, 0);
+      DockPanel hd = new DockPanel(); helpBtn.Child = hd; hd.Cursor = Cursors.Hand; hd.Background = Brushes.Transparent;
       Border hi = new Border(); hi.Width = 30; hi.Height = 30; hi.CornerRadius = new CornerRadius(9); hi.Background = Br("#1FFFFFFF"); hi.Margin = new Thickness(0, 0, 10, 0);
       TextBlock hg = new TextBlock(); hg.Text = ""; hg.FontFamily = new FontFamily("Segoe Fluent Icons"); hg.FontSize = 14;
       hg.HorizontalAlignment = HorizontalAlignment.Center; hg.VerticalAlignment = VerticalAlignment.Center; hi.Child = hg;
@@ -2397,7 +2408,32 @@ namespace Island {
       ht.Children.Add(h1); ht.Children.Add(helpSub); hd.Children.Add(ht);
       helpBtn.MouseEnter += delegate { helpBtn.Background = Br("#22FFFFFF"); };
       helpBtn.MouseLeave += delegate { helpBtn.Background = Br("#14FFFFFF"); };
-      helpBtn.MouseLeftButtonUp += delegate { Safe("que faire ici", ExplainWindow); };
+      hd.MouseLeftButtonUp += delegate { Safe("que faire ici", ExplainWindow); };
+      // consigne facultative : « regroupe ces documents et prépare la réponse »
+      Border ib = new Border(); ib.CornerRadius = new CornerRadius(12); ib.Background = Br("#1AFFFFFF"); ib.Margin = new Thickness(0, 9, 0, 0);
+      ib.Padding = new Thickness(10, 0, 2, 0); ib.Height = 32;
+      DockPanel idp = new DockPanel(); ib.Child = idp;
+      Button go = new Button(); go.Style = (Style)win.FindResource("IconBtn"); go.Padding = new Thickness(6);
+      TextBlock gt = new TextBlock(); gt.Text = "\uE724"; gt.FontFamily = new FontFamily("Segoe Fluent Icons"); gt.FontSize = 12; go.Content = gt;
+      go.Click += delegate { Safe("que faire ici", ExplainWindow); };
+      DockPanel.SetDock(go, Dock.Right); idp.Children.Add(go);
+      Grid ig = new Grid(); ig.VerticalAlignment = VerticalAlignment.Center;
+      helpPh = new TextBlock(); helpPh.Text = "Ta consigne (facultatif) : « prépare la réponse avec les documents »"; helpPh.FontSize = 11.5;
+      helpPh.Foreground = Br("#8E8E93"); helpPh.IsHitTestVisible = false; helpPh.TextTrimming = TextTrimming.CharacterEllipsis;
+      helpInput = new TextBox(); helpInput.Background = Brushes.Transparent; helpInput.BorderThickness = new Thickness(0); helpInput.Foreground = Brushes.White;
+      helpInput.CaretBrush = Brushes.White; helpInput.FontSize = 12; helpInput.Padding = new Thickness(-2, 0, 0, 0);
+      helpInput.FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI");
+      helpInput.TextChanged += delegate { helpPh.Visibility = helpInput.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed; };
+      helpInput.PreviewMouseLeftButtonDown += delegate { SideTyping(true); };
+      helpInput.KeyDown += delegate(object o, KeyEventArgs ev) {
+        if (ev.Key == Key.Enter) { ev.Handled = true; Safe("que faire ici", ExplainWindow); }
+        else if (ev.Key == Key.Escape) { ev.Handled = true; SideTyping(false); }
+      };
+      helpInput.LostKeyboardFocus += delegate { SideTyping(false); };
+      ig.Children.Add(helpPh); ig.Children.Add(helpInput);
+      idp.Children.Add(ig);
+      StackPanel hwrap = new StackPanel();
+      helpBtn.Child = null; hwrap.Children.Add(hd); hwrap.Children.Add(ib); helpBtn.Child = hwrap;
       col.Children.Add(helpBtn);
     }
     void BuildDownloadCard(StackPanel col) {
@@ -2453,8 +2489,13 @@ namespace Island {
       BitmapSource shot = CaptureWindow(fgAtOpen);
       if (shot == null) { ShowReply("Capture impossible", "Cette fenêtre ne se laisse pas capturer. Essaie une capture avec Win+Maj+S.", null); return; }
       string path = SaveJpeg(shot, "nox_fenetre.jpg");
-      Log("que faire ici : capture envoyée");   // jamais le titre ni le contenu
-      SendFile(path, "Voici une capture de la fenêtre que j'ai sous les yeux. Explique-moi simplement ce que je vois et dis-moi ce que je dois faire, étape par étape si besoin.");
+      string consigne = helpInput == null ? "" : helpInput.Text.Trim();
+      Log("que faire ici : capture envoyée" + (consigne.Length > 0 ? " avec consigne" : ""));   // jamais le titre ni le contenu
+      SendFile(path, consigne.Length > 0
+        ? "Voici une capture de la fenêtre que j'ai sous les yeux. Ma demande : " + consigne
+        : "Voici une capture de la fenêtre que j'ai sous les yeux. Explique-moi simplement ce que je vois et dis-moi ce que je dois faire, étape par étape si besoin.");
+      if (helpInput != null) helpInput.Text = "";
+      SideTyping(false);
     }
 
     // ---- « Maintenant » : prochain rendez-vous (aujourd'hui ou dans les 18 h) ----
@@ -2749,6 +2790,7 @@ namespace Island {
         ba.Completed += delegate { if (sidePanel.Effect == blur) sidePanel.Effect = null; };
         blur.BeginAnimation(BlurEffect.RadiusProperty, ba);
       } else {
+        if (sideTyping) SideTyping(false);
         sidePanel.IsHitTestVisible = false;
         sidePanel.Effect = null;
         Anim(sideT, TranslateTransform.XProperty, SideW + 20, 280, 0, new CubicEase { EasingMode = EasingMode.EaseIn });
@@ -2782,7 +2824,7 @@ namespace Island {
         Point tl = sidePanel.PointToScreen(new Point(0, 0)), br = sidePanel.PointToScreen(new Point(sidePanel.ActualWidth, sidePanel.ActualHeight));
         bool inside = p.X >= tl.X - 30 && p.Y >= tl.Y - 30 && p.Y <= br.Y + 30;
         if (inside) autoHoldUntil = DateTime.MinValue;   // la souris est venue : comportement normal
-        bool keep = inside || sideDragOver || sideModal || (now - sideDragAt).TotalMilliseconds < 700 || now < autoHoldUntil;
+        bool keep = inside || sideDragOver || sideModal || sideTyping || (now - sideDragAt).TotalMilliseconds < 700 || now < autoHoldUntil;
         if (keep) sideLeftAt = DateTime.MinValue;
         else if (sideLeftAt == DateTime.MinValue) sideLeftAt = now;
         else if ((now - sideLeftAt).TotalMilliseconds > 450) SideShow(false);
@@ -3740,7 +3782,7 @@ $noxScript = {
           $ext = [System.IO.Path]::GetExtension($path).ToLower()
           $mime = @{ '.pdf' = 'application/pdf'; '.jpg' = 'image/jpeg'; '.jpeg' = 'image/jpeg'; '.png' = 'image/png'; '.webp' = 'image/webp'; '.gif' = 'image/gif' }[$ext]
           $b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($path))
-          $pending += Post-Json '/api/conversation' @{ texte = $caption; image = @{ type = $mime; donnees = $b64 } }
+          $pending += Post-Json '/api/conversation' @{ texte = $caption; image = @{ type = $mime; donnees = $b64 }; demande = ($caption.Length -gt 0) }
           NLog ("fichier envoyé à Nox : " + [System.IO.Path]::GetFileName($path))
         }
         elseif ($c -like 'bouton:*') {
@@ -4023,6 +4065,7 @@ $workers = @(
           </Canvas>
         </Grid>
         <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center">
+          <TextBlock x:Name="CClockM" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="12.5" Foreground="#C7C7CC" VerticalAlignment="Center" Margin="0,0,10,0" Visibility="Collapsed" Typography.NumeralAlignment="Tabular"/>
           <StackPanel x:Name="CEq" Orientation="Horizontal" Height="14" VerticalAlignment="Center">
             <Rectangle x:Name="Eq1" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.35"/></Rectangle.RenderTransform></Rectangle>
             <Rectangle x:Name="Eq2" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
