@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.35'
+$Version = '4.36'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -1164,7 +1164,7 @@ namespace Island {
       if (on) {
         bool playing = Playing();
         if (DateTime.Now < peekUntil && (peekIsConfirm || E<TextBlock>("PApp").Text == "Nox")) { peekUntil = DateTime.MinValue; ShowPage("PgNox", 0); }
-        else ShowPage("PgNox", 0);   // on arrive toujours sur Nox, au milieu
+        else ShowPage(Playing() ? "PgMusic" : "PgNox", 0);   // musique en cours -> Musique, sinon Nox (au milieu)
       }
       bool fly = on && page == "PgMusic" && Playing() && layer == "Compact";
       Refresh();
