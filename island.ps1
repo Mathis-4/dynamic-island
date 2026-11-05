@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.39'
+$Version = '4.40'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -920,6 +920,7 @@ namespace Island {
       // boutons
       Click("BPlay", delegate { Cmd(HasMedia() ? "play" : "spotify"); });
       Click("BNext", delegate { Cmd("next"); });
+      Click("BLike", delegate { Safe("like", ToggleLike); });
       Click("BPrev", delegate { Cmd("prev"); });
       Click("BT25", delegate { StartTimer(25, "Focus"); });
       Click("BT5", delegate { StartTimer(5, "Pause"); });
@@ -1355,6 +1356,7 @@ namespace Island {
       if (tickN % 60 == 0) Audio.Reset();
       Safe("volume", UpdateVolume);
       Safe("musique", UpdateMedia);
+      Safe("like", LikeTick);
       if (tickN % 5 == 1) Safe("minuteur", UpdateTimer);
       if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
       if (tickN % 10 == 3) Safe("appareils", WatchDevices);
@@ -2008,7 +2010,7 @@ namespace Island {
           bool first = !noxSeen;
           noxMsgId = id;
           if (!first && !(expandedOn && page == "PgNox")) noxUnread = true;
-          if (!first && !(expandedOn && page == "PgNox") && !sideOpen) {   // panneau ouvert : la réponse s'y affiche déjà
+          if (!first && !(expandedOn && page == "PgNox") && !sideOpen && !sideWaiting) {   // panneau ouvert : la réponse s'y affiche déjà
             string flat = txt.Replace("\r", " ").Replace("\n", " ").Replace("**", "");
             string t1 = flat.Length > 60 ? flat.Substring(0, 60).TrimEnd() + "…" : flat;
             string t2 = flat.Length > 60 ? (flat.Length > 140 ? flat.Substring(60, 80).Trim() + "…" : flat.Substring(60).Trim()) : "";
@@ -2285,6 +2287,69 @@ namespace Island {
     }
     void Run(string what) { System.Diagnostics.Process.Start(what); }
 
+    // ---------------- cœur Spotify : liker le titre en cours (par Nox, API Spotify) ----------------
+    string likeTrack = ""; bool liked, likeKnown, likeAvailable, likePending; DateTime likeQueryAt = DateTime.MaxValue; int likeTries; double likeSeen;
+    void LikeTick() {
+      Hashtable md = Media();
+      bool sp = md != null && AppName(Str(G(md, "app"))) == "Spotify";
+      Hashtable n = G(sync, "nox") as Hashtable;
+      bool noxOk = n != null && Bool(G(n, "ok"));
+      E<Button>("BLike").Visibility = sp && noxOk && likeAvailable ? Visibility.Visible : Visibility.Collapsed;
+      if (!sp) { likeTrack = ""; return; }
+      string title = Str(G(md, "title"));
+      if (title != likeTrack) {
+        likeTrack = title; likeKnown = false; likeTries = 0; likePending = false;
+        likeQueryAt = DateTime.Now.AddMilliseconds(1200);   // Spotify met un instant à suivre le changement de titre
+        LikeLook(false, false);
+      }
+      if (DateTime.Now >= likeQueryAt && noxOk) { likeQueryAt = DateTime.MaxValue; likeTries++; Cmd("likeetat"); }
+      Hashtable r = G(sync, "liked") as Hashtable;
+      if (r == null) return;
+      double nn = Num(G(r, "n"));
+      if (nn == likeSeen) return;
+      likeSeen = nn;
+      string err = Str(G(r, "err")), t = Str(G(r, "titre"));
+      if (err.Length > 0) {
+        if (likePending) { likePending = false; liked = !liked; LikeLook(liked, likeKnown); }
+        if (err.Contains("connexion_spotify")) ShowPeek(null, "", "#FFFFFF", "#1C1C1E", "Spotify", "Likes pas encore autorisés", "Une commande à lancer une fois sur le serveur", 5000, false);
+        else if (err.Contains("aucun titre") && likeTries < 3) likeQueryAt = DateTime.Now.AddSeconds(2);
+        else Log("like : " + err);
+        return;
+      }
+      likeAvailable = true;
+      if (t.Length > 0 && !SameTitle(t, likeTrack)) {   // Spotify parle encore du titre précédent
+        if (likeTries < 4) likeQueryAt = DateTime.Now.AddSeconds(2);
+        return;
+      }
+      likePending = false;
+      liked = Bool(G(r, "aime")); likeKnown = true;
+      LikeLook(liked, true);
+    }
+    static bool SameTitle(string a, string b) {
+      a = a.Trim().ToLowerInvariant(); b = b.Trim().ToLowerInvariant();
+      return a.Length > 0 && b.Length > 0 && (a == b || a.StartsWith(b) || b.StartsWith(a));
+    }
+    void LikeLook(bool on, bool known) {
+      TextBlock ico = E<TextBlock>("BLikeIco");
+      ico.Text = on ? "" : "";
+      ico.Foreground = on ? Br("#FFFFFF") : Br("#AEAEB2");
+      ico.Opacity = known ? 1 : 0.4;
+      E<Button>("BLike").ToolTip = on ? "Retirer des Titres likés" : "Ajouter aux Titres likés";
+    }
+    void ToggleLike() {
+      if (!likeKnown) return;   // état pas encore connu : pas de clic à l'aveugle
+      liked = !liked; likePending = true;
+      LikeLook(liked, true);
+      TextBlock ico = E<TextBlock>("BLikeIco");
+      ScaleTransform sc = ico.RenderTransform as ScaleTransform;
+      if (sc == null) { sc = new ScaleTransform(1, 1); ico.RenderTransform = sc; ico.RenderTransformOrigin = new Point(0.5, 0.5); }
+      sc.BeginAnimation(ScaleTransform.ScaleXProperty, null); sc.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+      sc.ScaleX = liked ? 0.55 : 0.8; sc.ScaleY = liked ? 0.55 : 0.8;
+      Anim(sc, ScaleTransform.ScaleXProperty, 1, 450, 0, Back(liked ? 1.8 : 0.6));
+      Anim(sc, ScaleTransform.ScaleYProperty, 1, 450, 0, Back(liked ? 1.8 : 0.6));
+      Cmd(liked ? "like:1" : "like:0");
+    }
+
     // ---------- « Maintenant », « Que faire ici ? », téléchargements, aide à l'écriture (v4.39) ----------
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
@@ -2516,6 +2581,7 @@ namespace Island {
     string waitAfterId = "", replyKey = "";
     BitmapSource clipBitmap; DispatcherTimer clipTimer;
     Color sideAccent = Colors.Transparent;
+    DateTime autoHoldUntil = DateTime.MinValue;
     DateTime farAt = DateTime.MinValue;   // dernier moment où le curseur était loin du bord, bouton appuyé
 
     void BuildSide() {
@@ -2715,7 +2781,8 @@ namespace Island {
       } else {
         Point tl = sidePanel.PointToScreen(new Point(0, 0)), br = sidePanel.PointToScreen(new Point(sidePanel.ActualWidth, sidePanel.ActualHeight));
         bool inside = p.X >= tl.X - 30 && p.Y >= tl.Y - 30 && p.Y <= br.Y + 30;
-        bool keep = inside || sideDragOver || sideModal || (now - sideDragAt).TotalMilliseconds < 700;
+        if (inside) autoHoldUntil = DateTime.MinValue;   // la souris est venue : comportement normal
+        bool keep = inside || sideDragOver || sideModal || (now - sideDragAt).TotalMilliseconds < 700 || now < autoHoldUntil;
         if (keep) sideLeftAt = DateTime.MinValue;
         else if (sideLeftAt == DateTime.MinValue) sideLeftAt = now;
         else if ((now - sideLeftAt).TotalMilliseconds > 450) SideShow(false);
@@ -2727,7 +2794,7 @@ namespace Island {
         Safe("téléchargements", CheckDownload);
         if (sideOpen) Safe("maintenant", UpdateNow);
       }
-      if (sideOpen && replyCard.Visibility == Visibility.Visible) Safe("réponse", SideReply);
+      if ((sideOpen || sideWaiting) && replyCard.Visibility == Visibility.Visible) Safe("réponse", SideReply);
     }
 
     // couleurs, état de Nox, fraîcheur du presse-papiers
@@ -2807,6 +2874,25 @@ namespace Island {
       if (!NoxReady()) return;
       if (caption.Length == 0) NoxCmd("file:" + path); else NoxCmd("filecap:" + caption + "\u001f" + path);
       BeginWait(name);
+      DropReceived(name);
+    }
+    // accusé de réception dans la zone de dépôt (3 s), puis retour à l'état normal
+    DispatcherTimer dropTimer;
+    void DropReceived(string name) {
+      dropIcon.Text = "\uE73E"; dropIcon.Foreground = Br("#30D158");
+      dropTitle.Text = "Reçu par Nox"; dropSub.Text = name;
+      dropRect.Stroke = Br("#8030D158"); dropRect.Fill = Br("#1430D158");
+      if (dropTimer == null) {
+        dropTimer = new DispatcherTimer(DispatcherPriority.Background, win.Dispatcher); dropTimer.Interval = TimeSpan.FromSeconds(3);
+        dropTimer.Tick += delegate {
+          dropTimer.Stop();
+          dropIcon.Text = "\uE898"; dropIcon.Foreground = Br("#C7C7CC");
+          dropTitle.Text = "Dépose un PDF ou une photo"; dropSub.Text = "Nox te propose où le ranger · ou clique ici";
+          dropRect.Stroke = Br("#40FFFFFF"); dropRect.Fill = Br("#0DFFFFFF");
+        };
+      }
+      dropTimer.Stop(); dropTimer.Start();
+      if (!sideOpen) ShowToast("\uE73E", "Document reçu par Nox", "", Rgb("#30D158"), -1, 2200);
     }
     string SaveJpeg(BitmapSource src, string fileName) {
       BitmapSource b = src;
@@ -3040,7 +3126,11 @@ namespace Island {
       Hashtable conf = G(n, "confirm") as Hashtable;
       string id = last == null ? "" : Str(G(last, "id"));
       if (sideWaiting) {
-        if (id.Length > 0 && id != waitAfterId) sideWaiting = false;
+        if (id.Length > 0 && id != waitAfterId) {
+          sideWaiting = false;
+          // réponse arrivée panneau fermé : il ressort tout seul pour qu'on puisse cliquer (Ranger…)
+          if (!sideOpen && !hiddenFs) { SideShow(true); autoHoldUntil = DateTime.Now.AddSeconds(12); }
+        }
         else {
           if ((DateTime.Now - waitSince).TotalSeconds > 90) { sideWaiting = false; ShowReply("Pas de réponse", "Nox n'a pas répondu à temps. Regarde dans l'onglet Nox de la pilule.", null); }
           return;
@@ -3417,6 +3507,15 @@ $mediaScript = {
   $http.DefaultRequestHeaders.UserAgent.ParseAdd('MathisDynamicIsland/1.0')
   $updNext = [DateTime]::Now.AddSeconds(15)
   $trackKey = ''; $artTries = 0; $artNext = [DateTime]::MinValue
+  $likeTask = $null; $likeNext = $null; $likeN = 0
+  # cœur Spotify : demandé à Nox (API Spotify), sans bloquer la boucle
+  function Send-Like($c) {
+    $act = if ($c -eq 'likeetat') { '"action":"aime_etat"' } elseif ($c -eq 'like:1') { '"action":"aimer","valeur":true' } else { '"action":"aimer","valeur":false' }
+    $body = New-Object System.Net.Http.StringContent ('{' + $act + ',"leger":true}'), ([System.Text.Encoding]::UTF8), 'application/json'
+    $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post), ($sync.noxUrl + '/api/musique')
+    $req.Content = $body; $req.Headers.Add('X-Jarvis', '1')
+    return $http.SendAsync($req)
+  }
   $spotifyUntil = [DateTime]::MinValue
   $fallback = [System.Windows.Media.ColorConverter]::ConvertFromString($sync.accent)
 
@@ -3429,8 +3528,21 @@ $mediaScript = {
         }
         if (-not $sess) { $sess = $mgr.GetCurrentSession() }
 
+        if ($likeTask -and $likeTask.IsCompleted) {
+          $lt = $likeTask; $likeTask = $null; $likeN++
+          try {
+            $j = $lt.Result.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+            if ($j.ok -and $j.message) { $sync.liked = @{ aime = [bool]$j.message.aime; titre = [string]$j.message.titre; err = ''; n = $likeN } }
+            else { $sync.liked = @{ aime = $false; titre = ''; err = [string]$j.erreur; n = $likeN } }
+          } catch { $sync.liked = @{ aime = $false; titre = ''; err = $_.Exception.Message; n = $likeN } }
+          if ($likeNext) { $likeTask = Send-Like $likeNext; $likeNext = $null }
+        }
         $c = $null
         while ($sync.cmds.TryDequeue([ref]$c)) {
+          if ($c -like 'like*') {
+            if ($sync.noxUrl) { if ($likeTask) { $likeNext = $c } else { $likeTask = Send-Like $c } }
+            continue
+          }
           if ($c -eq 'spotify') {
             # ouvre Spotify puis lance la lecture dès que sa session apparaît
             try { Start-Process 'spotify:' } catch { BLog ("Spotify : " + $_.Exception.Message) }
@@ -4031,6 +4143,9 @@ $workers = @(
                   <TextBlock x:Name="EArtist" FontSize="13" Foreground="#C7C7CC" TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
                   <TextBlock x:Name="EApp" FontSize="11" Foreground="#8E8E93" Margin="0,3,0,0"/>
                 </StackPanel>
+                <Button x:Name="BLike" Grid.Column="2" Style="{StaticResource IconBtn}" Padding="8" VerticalAlignment="Center" Visibility="Collapsed">
+                  <TextBlock x:Name="BLikeIco" Text="&#xE006;" FontFamily="Segoe Fluent Icons" FontSize="17" Foreground="#AEAEB2"/>
+                </Button>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" Height="16" VerticalAlignment="Top" Margin="0,4,0,0" Visibility="Collapsed">
                   <Rectangle x:Name="Eq5" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4"/></Rectangle.RenderTransform></Rectangle>
                   <Rectangle x:Name="Eq6" Width="3" Height="16" RadiusX="1.5" RadiusY="1.5" Margin="1,0" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7"/></Rectangle.RenderTransform></Rectangle>
