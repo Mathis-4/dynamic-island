@@ -3,11 +3,11 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.42'
+$Version = '4.43'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
-$DefaultAccent    = "#8B7CFF"  # violet Nox
+$DefaultAccent    = "#D97B6B"  # terracotta Nox (charte ; avant : violet) — la musique garde les couleurs de la pochette
 $TimerColor       = "#FF9F0A"
 $ChargeColor      = "#30D158"
 $HideInFullscreen = $true
@@ -896,8 +896,8 @@ namespace Island {
       edgeBrush.GradientStops.Add(edgeTop); edgeBrush.GradientStops.Add(edgeMid); edgeBrush.GradientStops.Add(edgeLow);
       edgePath = E<Path>("Edge"); edgePath.Stroke = edgeBrush;
       earL.Fill = Brushes.Black; earR.Fill = Brushes.Black;
-      eyeGlow = new DropShadowEffect { BlurRadius = 8, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
-      eyeGlow2 = new DropShadowEffect { BlurRadius = 12, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#B9B4FF") };
+      eyeGlow = new DropShadowEffect { BlurRadius = 8, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#F4EFE6") };
+      eyeGlow2 = new DropShadowEffect { BlurRadius = 12, ShadowDepth = 0, Opacity = 0.95, Color = Rgb("#F4EFE6") };
 
       eyeGlow.Color = Rgb("#F4EFE6"); eyeGlow.BlurRadius = 7; eyeGlow.Opacity = 0.6;
       E<FrameworkElement>("CEyes").Effect = eyeGlow;
@@ -1489,7 +1489,7 @@ namespace Island {
         BubbleTo(bub);
       }
 
-      // teinte du bas : pochette quand ça joue, violet de Nox sinon
+      // teinte du bas : pochette quand ça joue, terracotta de Nox sinon
       Color col = accentDefault; double level;
       // teinte légère (avis design : la bande saturée faisait « défaut d'affichage »)
       if (playing) { col = accent; level = name == "Compact" ? 0.14 : 0.3; }   // musique en pause = ambiance du moment
@@ -1567,9 +1567,9 @@ namespace Island {
       Color[] p;
       if (key.StartsWith("matin")) p = new[] { Rgb("#E8A87C"), Rgb("#F4EFE6"), Rgb("#849C8B"), Rgb("#D46F61") };   // aube : pêche, crème, sauge
       else if (key.StartsWith("jour")) p = new[] { Rgb("#849C8B"), Rgb("#5FA8A0"), Rgb("#F4EFE6"), Rgb("#6F8877") };  // journée : sauge, eau, crème
-      else if (key.StartsWith("soir")) p = new[] { Rgb("#D46F61"), Rgb("#8B6FB8"), Rgb("#E8A87C"), Rgb("#4A3F6B") };  // soir : terracotta, violet
-      else p = new[] { Rgb("#3B3F7A"), Rgb("#5B6B9A"), Rgb("#2A2D4F"), Rgb("#849C8B") };                            // nuit : indigo, sauge
-      if (key.EndsWith("+nox")) p[1] = Rgb("#9C8BFF");   // Nox au travail : une touche de violet
+      else if (key.StartsWith("soir")) p = new[] { Rgb("#D46F61"), Rgb("#D6B989"), Rgb("#E8A87C"), Rgb("#8C6F86") };  // soir : terracotta, sable, pêche, prune (charte Nox)
+      else p = new[] { Rgb("#4A403A"), Rgb("#6F8877"), Rgb("#2C2B29"), Rgb("#849C8B") };                            // nuit : charbon chaud, sauge (charte : jamais bleu-noir)
+      if (key.EndsWith("+nox")) p[1] = Rgb("#B59CB0");   // Nox au travail : une touche de prune (couleur « réflexion » de la charte)
       return p;
     }
     static Color PaletteMain(string key) { return PaletteColors(key)[0]; }
@@ -1970,8 +1970,8 @@ namespace Island {
         act = Str(G(n, "activity"));
       }
       noxState = state;
-      Color dot = state == "online" ? Rgb("#30D158") : state == "busy" ? accentDefault : state == "down" ? Rgb("#FF453A") : Rgb("#8E8E93");
-      Color glow = state == "online" ? Rgb("#9BF0B0") : state == "down" ? Rgb("#FF8A80") : Rgb("#B9B4FF");
+      Color dot = state == "online" ? Rgb("#9AB2A1") : state == "busy" ? accentDefault : state == "down" ? Rgb("#EF6A5A") : Rgb("#ADA69C");   // charte Nox
+      Color glow = state == "online" ? Rgb("#B9CDBF") : state == "down" ? Rgb("#EF6A5A") : Rgb("#E89A8B");
       E<Ellipse>("NDot").Fill = Br(dot);
       E<TextBlock>("NState").Text = text;
       E<TextBlock>("NAct").Text = act;
@@ -2030,7 +2030,7 @@ namespace Island {
         string jt = Str(G(conf, "jeton"));
         if (Str(G(sync, "confShown")) != jt) {
           sync["confShown"] = jt;
-          ShowPeek(null, "", "#FFFFFF", "#FF9F0A", "Nox · feu vert", desc, null, 15000, true);
+          ShowPeek(null, "", "#FFFFFF", "#D97B6B", "Nox · feu vert", desc, null, 15000, true);
         }
       }
       Vis("NBusy", Bool(G(n, "occupe")));
@@ -2115,14 +2115,14 @@ namespace Island {
       string f = files[0], ext = System.IO.Path.GetExtension(f).ToLowerInvariant(), name = System.IO.Path.GetFileName(f);
       Hashtable n = G(sync, "nox") as Hashtable;
       if (Array.IndexOf(DropTypes, ext) < 0)
-        ShowPeek(null, "\uE783", "#FFFFFF", "#FF453A", "Nox", "Format non pris en charge", "PDF ou photo seulement", 4000, false);
+        ShowPeek(null, "\uE783", "#FFFFFF", "#EF6A5A", "Nox", "Format non pris en charge", "PDF ou photo seulement", 4000, false);
       else if (new System.IO.FileInfo(f).Length > 5000000)
-        ShowPeek(null, "\uE783", "#FFFFFF", "#FF453A", "Nox", "Fichier trop lourd", "5 Mo maximum", 4000, false);
+        ShowPeek(null, "\uE783", "#FFFFFF", "#EF6A5A", "Nox", "Fichier trop lourd", "5 Mo maximum", 4000, false);
       else if (n == null || !Bool(G(n, "ok")))
-        ShowPeek(null, "\uE783", "#FFFFFF", "#FF453A", "Nox", "Nox est injoignable", "Vérifie que Tailscale est lancé", 4000, false);
+        ShowPeek(null, "\uE783", "#FFFFFF", "#EF6A5A", "Nox", "Nox est injoignable", "Vérifie que Tailscale est lancé", 4000, false);
       else {
         NoxCmd("file:" + f);
-        ShowPeek(null, "\uE898", "#FFFFFF", "#30D158", "Nox", "Envoyé à Nox", name, 4000, false);
+        ShowPeek(null, "\uE898", "#FFFFFF", "#849C8B", "Nox", "Envoyé à Nox", name, 4000, false);
         if (files.Length > 1) Log("glisser-déposer : seul le premier fichier est envoyé");
       }
       Refresh();
@@ -3407,7 +3407,7 @@ namespace Island {
     bool talking, musicPausedByVoice; DateTime resumeMusicAt = DateTime.MinValue; string voiceState = "";
     void TalkStart() {
       string u = Str(G(sync, "noxUrl"));
-      if (u.Length == 0) { ShowPeek(null, "\uE720", "#FFFFFF", "#FF453A", "Nox", "Nox est introuvable", "Vérifie que Tailscale est lancé", 4000, false); Refresh(); return; }
+      if (u.Length == 0) { ShowPeek(null, "\uE720", "#FFFFFF", "#EF6A5A", "Nox", "Nox est introuvable", "Vérifie que Tailscale est lancé", 4000, false); Refresh(); return; }
       talking = true; Hover();
       if (Playing()) { Cmd("play"); musicPausedByVoice = true; }   // on baisse le rideau sur la musique pendant qu'on parle
       resumeMusicAt = DateTime.MaxValue;
@@ -3428,7 +3428,7 @@ namespace Island {
       if (st == "ecoute") s.Text = "t'écoute…";
       else if (st == "reflechit") s.Text = "réfléchit…";
       else if (st == "parle") s.Text = "parle…";
-      else if (st.StartsWith("erreur:")) { s.Text = "en ligne"; ShowPeek(null, "\uE720", "#FFFFFF", "#FF453A", "Nox", "Vocal indisponible", st.Substring(7), 5000, false); Refresh(); }
+      else if (st.StartsWith("erreur:")) { s.Text = "en ligne"; ShowPeek(null, "\uE720", "#FFFFFF", "#EF6A5A", "Nox", "Vocal indisponible", st.Substring(7), 5000, false); Refresh(); }
       else s.Text = "en ligne";
       squinting = st == "reflechit"; Squint(squinting);
     }
@@ -4270,7 +4270,7 @@ $workers = @(
                     <TextBlock Text="Nox" FontFamily="Segoe UI Variable Display Semibold, Segoe UI Semibold" FontSize="16"/>
                     <Ellipse x:Name="NDot" Width="8" Height="8" Margin="9,3,0,0" VerticalAlignment="Center" Fill="#8E8E93"/>
                     <TextBlock x:Name="NState" FontSize="12.5" Foreground="#AEAEB2" Margin="6,3,0,0" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="NBusy" Text="  · écrit…" FontSize="12.5" Foreground="#B9B4FF" Margin="0,3,0,0" VerticalAlignment="Center" Visibility="Collapsed"/>
+                    <TextBlock x:Name="NBusy" Text="  · écrit…" FontSize="12.5" Foreground="#E89A8B" Margin="0,3,0,0" VerticalAlignment="Center" Visibility="Collapsed"/>
                   </StackPanel>
                   <TextBlock x:Name="NAct" FontSize="12.5" Foreground="#C7C7CC" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
                 </StackPanel>
