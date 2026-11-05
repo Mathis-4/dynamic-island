@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.36'
+$Version = '4.37'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -978,7 +978,7 @@ namespace Island {
         if (src != null) src.AddHook(WndProc);
         Log("fenêtre créée");
       };
-      win.ContentRendered += delegate { Log("fenêtre affichée à l'écran"); };
+      win.ContentRendered += delegate { Log("fenêtre affichée à l'écran"); Safe("panneau", BuildSide); };
       // sortie de veille : l'affichage transparent peut se perdre (carte graphique réinitialisée) -> redémarrage propre
       Microsoft.Win32.SystemEvents.PowerModeChanged += delegate(object o, Microsoft.Win32.PowerModeChangedEventArgs ev) {
         if (ev.Mode != Microsoft.Win32.PowerModes.Resume) return;
@@ -1359,6 +1359,7 @@ namespace Island {
       if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
       if (tickN % 10 == 3) Safe("appareils", WatchDevices);
       if (tickN % 20 == 7) Safe("état du PC", PollSys);
+      Safe("panneau", SideTick);
       Safe("anneaux", AnimateSys);
       if (tickN % 10 == 1) {
         Safe("batterie", delegate { if (!ringIsTimer) UpdateBattery(); });
@@ -2007,7 +2008,7 @@ namespace Island {
           bool first = !noxSeen;
           noxMsgId = id;
           if (!first && !(expandedOn && page == "PgNox")) noxUnread = true;
-          if (!first && !(expandedOn && page == "PgNox")) {
+          if (!first && !(expandedOn && page == "PgNox") && !sideOpen) {   // panneau ouvert : la réponse s'y affiche déjà
             string flat = txt.Replace("\r", " ").Replace("\n", " ").Replace("**", "");
             string t1 = flat.Length > 60 ? flat.Substring(0, 60).TrimEnd() + "…" : flat;
             string t2 = flat.Length > 60 ? (flat.Length > 140 ? flat.Substring(60, 80).Trim() + "…" : flat.Substring(60).Trim()) : "";
@@ -2283,6 +2284,552 @@ namespace Island {
       }
     }
     void Run(string what) { System.Diagnostics.Process.Start(what); }
+
+    // ================= Panneau latéral (bord droit de l'écran) =================
+    // Tout ce qui arrive sur le PC (fichier déposé, presse-papiers) devient une action Nox en un clic.
+    // Rien n'est envoyé sans clic ; le presse-papiers est analysé ici, sur le PC, et jamais écrit dans le journal.
+    [DllImport("user32.dll")] static extern bool AddClipboardFormatListener(IntPtr h);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int k);
+    const double SideW = 330;
+    Window side; IntPtr sideHwnd = IntPtr.Zero;
+    Border sidePanel, sideHandle, sideGrab, clipCard, replyCard, clipIconBox;
+    TranslateTransform sideT; ScaleTransform dropScale;
+    Rectangle dropRect; TextBlock dropIcon, dropTitle, dropSub, sideState, clipKindTb, clipTextTb, clipGlyph, clipEmpty, replyHead, replyText;
+    Image clipImg; WrapPanel clipChips, replyBtns;
+    GradientStop rimStop, glowStop;
+    bool sideOpen, sideDragOver, sideModal, sideWaiting;
+    DateTime edgeSince = DateTime.MinValue, sideLeftAt = DateTime.MinValue, sideDragAt = DateTime.MinValue, waitSince = DateTime.MinValue, clipAt = DateTime.MinValue;
+    string waitAfterId = "", replyKey = "";
+    BitmapSource clipBitmap; DispatcherTimer clipTimer;
+    Color sideAccent = Colors.Transparent;
+    DateTime farAt = DateTime.MinValue;   // dernier moment où le curseur était loin du bord, bouton appuyé
+
+    void BuildSide() {
+      side = new Window();
+      side.WindowStyle = WindowStyle.None; side.AllowsTransparency = true; side.Background = Brushes.Transparent;
+      side.Topmost = true; side.ShowInTaskbar = false; side.ShowActivated = false; side.ResizeMode = ResizeMode.NoResize;
+      side.Title = "Nox - panneau"; side.Foreground = Brushes.White;
+      side.FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI");
+      Grid root = new Grid();
+      side.Content = root;
+
+      // poignée discrète collée au bord (zone de survol et de dépôt un peu plus large qu'elle)
+      sideGrab = new Border(); sideGrab.Width = 14; sideGrab.Height = 150; sideGrab.Background = Brushes.Transparent;
+      sideGrab.HorizontalAlignment = HorizontalAlignment.Right; sideGrab.VerticalAlignment = VerticalAlignment.Center;
+      sideHandle = new Border(); sideHandle.Width = 4; sideHandle.Height = 56; sideHandle.CornerRadius = new CornerRadius(2);
+      sideHandle.Background = Br("#59FFFFFF"); sideHandle.HorizontalAlignment = HorizontalAlignment.Right; sideHandle.VerticalAlignment = VerticalAlignment.Center;
+      sideHandle.Margin = new Thickness(0, 0, 3, 0);
+      sideGrab.Child = sideHandle;
+      sideHandle.MouseEnter += delegate { if (!sideOpen && !hiddenFs) SideShow(true); };
+      root.Children.Add(sideGrab);
+
+      // le panneau : noir, collé au bord comme la pilule l'est au haut de l'écran
+      sidePanel = new Border();
+      sidePanel.Width = 320; sidePanel.HorizontalAlignment = HorizontalAlignment.Right; sidePanel.VerticalAlignment = VerticalAlignment.Center;
+      sidePanel.CornerRadius = new CornerRadius(26, 0, 0, 26);
+      LinearGradientBrush bg = new LinearGradientBrush(); bg.StartPoint = new Point(0, 0); bg.EndPoint = new Point(0.6, 1);
+      glowStop = new GradientStop(Color.FromArgb(0x26, 0x84, 0x9C, 0x8B), 0);
+      bg.GradientStops.Add(glowStop); bg.GradientStops.Add(new GradientStop(Color.FromRgb(0, 0, 0), 0.55));
+      sidePanel.Background = bg;
+      LinearGradientBrush rim = new LinearGradientBrush(); rim.StartPoint = new Point(0, 0); rim.EndPoint = new Point(1, 1);
+      rim.GradientStops.Add(new GradientStop(Color.FromArgb(0x38, 255, 255, 255), 0));
+      rim.GradientStops.Add(new GradientStop(Color.FromArgb(0x0A, 255, 255, 255), 0.4));
+      rimStop = new GradientStop(Color.FromArgb(0x50, 0x84, 0x9C, 0x8B), 1);
+      rim.GradientStops.Add(rimStop);
+      sidePanel.BorderBrush = rim; sidePanel.BorderThickness = new Thickness(1, 1, 0, 1);
+      sidePanel.Padding = new Thickness(18, 16, 18, 18);
+      sideT = new TranslateTransform(SideW + 20, 0); sidePanel.RenderTransform = sideT;
+      sidePanel.Opacity = 0; sidePanel.IsHitTestVisible = false;
+      root.Children.Add(sidePanel);
+
+      StackPanel col = new StackPanel();
+      sidePanel.Child = col;
+
+      // en-tête
+      DockPanel head = new DockPanel(); head.Margin = new Thickness(2, 0, 0, 12);
+      sideState = new TextBlock(); sideState.FontSize = 11.5; sideState.Foreground = Br("#8E8E93"); sideState.VerticalAlignment = VerticalAlignment.Center;
+      DockPanel.SetDock(sideState, Dock.Right); head.Children.Add(sideState);
+      TextBlock ttl = new TextBlock(); ttl.Text = "Nox"; ttl.FontSize = 16; ttl.FontFamily = new FontFamily("Segoe UI Variable Display Semibold, Segoe UI Semibold");
+      head.Children.Add(ttl);
+      col.Children.Add(head);
+
+      // zone de dépôt
+      Grid dz = new Grid(); dz.Height = 104; dz.Cursor = Cursors.Hand; dz.Background = Brushes.Transparent;
+      dropScale = new ScaleTransform(1, 1); dz.RenderTransform = dropScale; dz.RenderTransformOrigin = new Point(0.5, 0.5);
+      dropRect = new Rectangle(); dropRect.RadiusX = 18; dropRect.RadiusY = 18; dropRect.StrokeThickness = 1.2;
+      dropRect.StrokeDashArray = new DoubleCollection(new double[] { 4, 3 }); dropRect.Stroke = Br("#40FFFFFF"); dropRect.Fill = Br("#0DFFFFFF");
+      dz.Children.Add(dropRect);
+      StackPanel dzs = new StackPanel(); dzs.VerticalAlignment = VerticalAlignment.Center; dzs.HorizontalAlignment = HorizontalAlignment.Center;
+      dropIcon = new TextBlock(); dropIcon.Text = ""; dropIcon.FontFamily = new FontFamily("Segoe Fluent Icons"); dropIcon.FontSize = 20;
+      dropIcon.HorizontalAlignment = HorizontalAlignment.Center; dropIcon.Foreground = Br("#C7C7CC");
+      dropTitle = new TextBlock(); dropTitle.Text = "Dépose un PDF ou une photo"; dropTitle.FontSize = 13; dropTitle.Margin = new Thickness(0, 7, 0, 0);
+      dropTitle.FontFamily = new FontFamily("Segoe UI Variable Text Semibold, Segoe UI Semibold"); dropTitle.HorizontalAlignment = HorizontalAlignment.Center;
+      dropSub = new TextBlock(); dropSub.Text = "Nox te propose où le ranger · ou clique ici"; dropSub.FontSize = 11; dropSub.Foreground = Br("#8E8E93");
+      dropSub.HorizontalAlignment = HorizontalAlignment.Center; dropSub.Margin = new Thickness(0, 2, 0, 0);
+      dzs.Children.Add(dropIcon); dzs.Children.Add(dropTitle); dzs.Children.Add(dropSub);
+      dz.Children.Add(dzs);
+      dz.MouseEnter += delegate { if (!sideDragOver) dropRect.Fill = Br("#17FFFFFF"); };
+      dz.MouseLeave += delegate { if (!sideDragOver) dropRect.Fill = Br("#0DFFFFFF"); };
+      dz.MouseLeftButtonUp += delegate { Safe("choisir un fichier", PickFile); };
+      col.Children.Add(dz);
+
+      // presse-papiers
+      col.Children.Add(SideLabel("Presse-papiers"));
+      clipCard = new Border(); clipCard.CornerRadius = new CornerRadius(16); clipCard.Background = Br("#14FFFFFF"); clipCard.Padding = new Thickness(12);
+      StackPanel cc = new StackPanel(); clipCard.Child = cc;
+      clipEmpty = new TextBlock(); clipEmpty.TextWrapping = TextWrapping.Wrap; clipEmpty.FontSize = 11.5; clipEmpty.Foreground = Br("#8E8E93"); clipEmpty.LineHeight = 16;
+      clipEmpty.Text = "Copie un numéro de suivi, une adresse, un lien, une date, un fichier, ou fais une capture (Win+Maj+S) : Nox te propose quoi en faire.";
+      cc.Children.Add(clipEmpty);
+      DockPanel crow = new DockPanel(); crow.Visibility = Visibility.Collapsed; crow.Tag = "row";
+      clipIconBox = new Border(); clipIconBox.Width = 36; clipIconBox.Height = 36; clipIconBox.CornerRadius = new CornerRadius(10); clipIconBox.Background = Br("#1FFFFFFF");
+      clipIconBox.VerticalAlignment = VerticalAlignment.Top; clipIconBox.Margin = new Thickness(0, 0, 10, 0);
+      Grid ib = new Grid(); clipIconBox.Child = ib;
+      clipGlyph = new TextBlock(); clipGlyph.FontFamily = new FontFamily("Segoe Fluent Icons"); clipGlyph.FontSize = 15;
+      clipGlyph.HorizontalAlignment = HorizontalAlignment.Center; clipGlyph.VerticalAlignment = VerticalAlignment.Center;
+      clipImg = new Image(); clipImg.Stretch = Stretch.UniformToFill; clipImg.Clip = new RectangleGeometry(new Rect(0, 0, 36, 36), 10, 10);
+      ib.Children.Add(clipGlyph); ib.Children.Add(clipImg);
+      DockPanel.SetDock(clipIconBox, Dock.Left); crow.Children.Add(clipIconBox);
+      StackPanel ct = new StackPanel();
+      clipKindTb = new TextBlock(); clipKindTb.FontSize = 11; clipKindTb.Foreground = Br("#8E8E93");
+      clipTextTb = new TextBlock(); clipTextTb.FontSize = 12.5; clipTextTb.TextWrapping = TextWrapping.Wrap; clipTextTb.TextTrimming = TextTrimming.CharacterEllipsis;
+      clipTextTb.MaxHeight = 36; clipTextTb.Margin = new Thickness(0, 1, 0, 0);
+      ct.Children.Add(clipKindTb); ct.Children.Add(clipTextTb);
+      crow.Children.Add(ct);
+      cc.Children.Add(crow);
+      clipChips = new WrapPanel(); clipChips.Margin = new Thickness(0, 10, 0, -6); clipChips.Visibility = Visibility.Collapsed;
+      cc.Children.Add(clipChips);
+      col.Children.Add(clipCard);
+
+      // réponse de Nox (apparaît après une action)
+      replyCard = new Border(); replyCard.CornerRadius = new CornerRadius(16); replyCard.Background = Br("#1AFFFFFF"); replyCard.Padding = new Thickness(12);
+      replyCard.Margin = new Thickness(0, 12, 0, 0); replyCard.Visibility = Visibility.Collapsed;
+      StackPanel rc = new StackPanel(); replyCard.Child = rc;
+      replyHead = new TextBlock(); replyHead.FontSize = 11; replyHead.Foreground = Br("#8E8E93");
+      replyText = new TextBlock(); replyText.FontSize = 12.5; replyText.TextWrapping = TextWrapping.Wrap; replyText.TextTrimming = TextTrimming.CharacterEllipsis;
+      replyText.MaxHeight = 150; replyText.LineHeight = 17; replyText.Margin = new Thickness(0, 3, 0, 0);
+      replyBtns = new WrapPanel(); replyBtns.Margin = new Thickness(0, 10, 0, -6);
+      rc.Children.Add(replyHead); rc.Children.Add(replyText); rc.Children.Add(replyBtns);
+      col.Children.Add(replyCard);
+
+      // glisser-déposer
+      side.AllowDrop = true;
+      side.DragEnter += SideDrag; side.DragOver += SideDrag;
+      side.DragLeave += delegate { sideDragAt = DateTime.Now; DropLook(false); };
+      side.Drop += SideDrop;
+
+      side.SourceInitialized += delegate {
+        sideHwnd = new WindowInteropHelper(side).Handle;
+        Win.NoActivate(sideHwnd, true);
+        HwndSource src = HwndSource.FromHwnd(sideHwnd);
+        if (src != null) src.AddHook(SideProc);
+        if (!AddClipboardFormatListener(sideHwnd)) Log("panneau : presse-papiers non surveillé");
+      };
+      clipTimer = new DispatcherTimer(DispatcherPriority.Background, win.Dispatcher);
+      clipTimer.Interval = TimeSpan.FromMilliseconds(250);
+      clipTimer.Tick += delegate { clipTimer.Stop(); Safe("presse-papiers", ReadClip); };
+      PlaceSide();
+      side.Show();
+      Log("panneau latéral prêt");
+    }
+
+    TextBlock SideLabel(string t) {
+      TextBlock l = new TextBlock(); l.Text = t; l.FontSize = 11; l.Foreground = Br("#8E8E93"); l.Margin = new Thickness(4, 16, 0, 6);
+      return l;
+    }
+    void PlaceSide() {
+      Rect wa = SystemParameters.WorkArea;
+      side.Width = SideW + 30; side.Height = wa.Height;
+      side.Left = wa.Right - side.Width; side.Top = wa.Top;
+    }
+    IntPtr SideProc(IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled) {
+      if (msg == 0x031D && clipTimer != null) { clipTimer.Stop(); clipTimer.Start(); }   // WM_CLIPBOARDUPDATE
+      return IntPtr.Zero;
+    }
+
+    void SideShow(bool on) {
+      if (side == null || on == sideOpen) return;
+      sideOpen = on;
+      if (on) {
+        Safe("panneau", SideRefresh);
+        sidePanel.IsHitTestVisible = true;
+        sideT.BeginAnimation(TranslateTransform.XProperty, null);
+        Anim(sideT, TranslateTransform.XProperty, 0, 460, 0, Back(0.22));
+        Anim(sidePanel, UIElement.OpacityProperty, 1, 180, 0, null);
+        Anim(sideHandle, UIElement.OpacityProperty, 0, 120, 0, null);
+        BlurEffect blur = new BlurEffect(); blur.Radius = 10; sidePanel.Effect = blur;
+        DoubleAnimation ba = new DoubleAnimation(0, TimeSpan.FromMilliseconds(320));
+        ba.Completed += delegate { if (sidePanel.Effect == blur) sidePanel.Effect = null; };
+        blur.BeginAnimation(BlurEffect.RadiusProperty, ba);
+      } else {
+        sidePanel.IsHitTestVisible = false;
+        sidePanel.Effect = null;
+        Anim(sideT, TranslateTransform.XProperty, SideW + 20, 280, 0, new CubicEase { EasingMode = EasingMode.EaseIn });
+        Anim(sidePanel, UIElement.OpacityProperty, 0, 220, 60, null);
+        Anim(sideHandle, UIElement.OpacityProperty, 1, 200, 220, null);
+        sideLeftAt = DateTime.MinValue;
+      }
+    }
+
+    // appelé 10 fois par seconde par la boucle principale
+    void SideTick() {
+      if (side == null || sideHwnd == IntPtr.Zero) return;
+      DateTime now = DateTime.Now;
+      if (hiddenFs) { if (sideOpen) SideShow(false); edgeSince = DateTime.MinValue; side.Opacity = 0; return; }
+      side.Opacity = 1;
+      Win.POINT p; if (!GetCursorPos(out p)) return;
+      Point pt = new Point(p.X, p.Y);
+      PresentationSource ps = PresentationSource.FromVisual(side);
+      if (ps != null && ps.CompositionTarget != null) pt = ps.CompositionTarget.TransformFromDevice.Transform(pt);
+      Rect wa = SystemParameters.WorkArea;
+      bool button = (GetAsyncKeyState(0x01) & 0x8000) != 0;
+      if (!sideOpen) {
+        bool atEdge = pt.X >= SystemParameters.PrimaryScreenWidth - 2 && pt.Y > wa.Top + wa.Height * 0.15 && pt.Y < wa.Top + wa.Height * 0.85;
+        // fichier glissé vers le bord : on ouvre vite ; barre de défilement tenue au bord : on n'ouvre pas
+        if (button && pt.X < SystemParameters.PrimaryScreenWidth - 120) farAt = now;
+        bool dragIn = button && (now - farAt).TotalMilliseconds < 900;
+        if (!atEdge || (button && !dragIn)) edgeSince = DateTime.MinValue;
+        else if (edgeSince == DateTime.MinValue) edgeSince = now;
+        else if ((now - edgeSince).TotalMilliseconds >= (button ? 120 : 350)) { edgeSince = DateTime.MinValue; SideShow(true); }
+      } else {
+        Point tl = sidePanel.PointToScreen(new Point(0, 0)), br = sidePanel.PointToScreen(new Point(sidePanel.ActualWidth, sidePanel.ActualHeight));
+        bool inside = p.X >= tl.X - 30 && p.Y >= tl.Y - 30 && p.Y <= br.Y + 30;
+        bool keep = inside || sideDragOver || sideModal || (now - sideDragAt).TotalMilliseconds < 700;
+        if (keep) sideLeftAt = DateTime.MinValue;
+        else if (sideLeftAt == DateTime.MinValue) sideLeftAt = now;
+        else if ((now - sideLeftAt).TotalMilliseconds > 450) SideShow(false);
+      }
+      if (tickN % 10 == 4) {
+        Rect cur = new Rect(side.Left, side.Top, side.Width, side.Height);
+        if (Math.Abs(cur.Right - wa.Right) > 1 || Math.Abs(cur.Height - wa.Height) > 1) PlaceSide();
+        Safe("panneau", SideRefresh);
+      }
+      if (sideOpen && replyCard.Visibility == Visibility.Visible) Safe("réponse", SideReply);
+    }
+
+    // couleurs, état de Nox, fraîcheur du presse-papiers
+    void SideRefresh() {
+      Color a = Playing() ? accent : Rgb("#849C8B");
+      if (a != sideAccent) {
+        sideAccent = a;
+        rimStop.Color = Color.FromArgb(0x55, a.R, a.G, a.B);
+        glowStop.Color = Color.FromArgb(0x2A, a.R, a.G, a.B);
+      }
+      bool fresh = clipAt != DateTime.MinValue && (DateTime.Now - clipAt).TotalMinutes < 15;
+      if (!fresh && clipAt != DateTime.MinValue) ClearClip();
+      sideHandle.Background = fresh ? Br(Color.FromArgb(0xE6, a.R, a.G, a.B)) : Br("#59FFFFFF");
+      Hashtable n = G(sync, "nox") as Hashtable;
+      bool ok = n != null && Bool(G(n, "ok"));
+      sideState.Text = ok ? (Bool(G(n, "occupe")) || Bool(G(n, "busy")) ? "au travail" : "en ligne") : "injoignable";
+      sideState.Foreground = ok ? Br("#8E8E93") : Br("#FF453A");
+    }
+    bool NoxReady() {
+      Hashtable n = G(sync, "nox") as Hashtable;
+      if (n != null && Bool(G(n, "ok"))) return true;
+      ShowReply("Nox est injoignable", "Vérifie que Tailscale est lancé, puis réessaie.", null);
+      return false;
+    }
+
+    // ---------- dépôt de fichier ----------
+    void SideDrag(object o, DragEventArgs e) {
+      e.Handled = true;
+      if (!e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effects = DragDropEffects.None; return; }
+      e.Effects = DragDropEffects.Copy;
+      sideDragAt = DateTime.Now;
+      if (!sideOpen) SideShow(true);
+      DropLook(true);
+    }
+    void DropLook(bool on) {
+      if (on == sideDragOver) return;
+      sideDragOver = on;
+      Color a = sideAccent == Colors.Transparent ? Rgb("#849C8B") : sideAccent;
+      dropRect.Stroke = on ? Br(a) : Br("#40FFFFFF");
+      dropRect.Fill = on ? Br(Color.FromArgb(0x26, a.R, a.G, a.B)) : Br("#0DFFFFFF");
+      dropTitle.Text = on ? "Lâche, Nox s'en occupe" : "Dépose un PDF ou une photo";
+      dropIcon.Foreground = on ? Br(a) : Br("#C7C7CC");
+      Anim(dropScale, ScaleTransform.ScaleXProperty, on ? 1.03 : 1, 260, 0, Back(0.5));
+      Anim(dropScale, ScaleTransform.ScaleYProperty, on ? 1.03 : 1, 260, 0, Back(0.5));
+    }
+    void SideDrop(object o, DragEventArgs e) {
+      e.Handled = true;
+      sideDragAt = DateTime.Now;
+      DropLook(false);
+      string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
+      if (files == null || files.Length == 0) return;
+      if (files.Length > 1) Log("panneau : seul le premier fichier est envoyé");
+      Safe("envoi de fichier", delegate { SendFile(files[0], ""); });
+    }
+    void PickFile() {
+      Microsoft.Win32.OpenFileDialog dlg = new Microsoft.Win32.OpenFileDialog();
+      dlg.Title = "Envoyer un document à Nox";
+      dlg.Filter = "PDF et photos|*.pdf;*.jpg;*.jpeg;*.png;*.webp;*.gif";
+      sideModal = true;
+      bool? res = null;
+      try { res = dlg.ShowDialog(); } finally { sideModal = false; sideLeftAt = DateTime.MinValue; }
+      if (res == true) SendFile(dlg.FileName, "");
+    }
+    // envoie le fichier à Nox (une photo trop lourde est réduite avant l'envoi)
+    void SendFile(string path, string caption) {
+      string ext = System.IO.Path.GetExtension(path).ToLowerInvariant(), name = System.IO.Path.GetFileName(path);
+      if (Array.IndexOf(DropTypes, ext) < 0) { ShowReply("Format non pris en charge", "Nox accepte les PDF et les photos.", null); return; }
+      long size = new System.IO.FileInfo(path).Length;
+      if (size > 4800000) {
+        if (ext == ".pdf" || ext == ".gif") { ShowReply("Fichier trop lourd", name + " dépasse 5 Mo.", null); return; }
+        BitmapImage bi = new BitmapImage();
+        bi.BeginInit(); bi.UriSource = new Uri(path); bi.DecodePixelWidth = 2400; bi.CacheOption = BitmapCacheOption.OnLoad; bi.EndInit();
+        path = SaveJpeg(bi, "nox_photo.jpg");
+      }
+      if (!NoxReady()) return;
+      if (caption.Length == 0) NoxCmd("file:" + path); else NoxCmd("filecap:" + caption + "\u001f" + path);
+      BeginWait(name);
+    }
+    string SaveJpeg(BitmapSource src, string fileName) {
+      BitmapSource b = src;
+      double max = Math.Max(b.PixelWidth, b.PixelHeight);
+      if (max > 2400) b = new TransformedBitmap(b, new ScaleTransform(2400 / max, 2400 / max));
+      if (b.Format != PixelFormats.Bgr24) b = new FormatConvertedBitmap(b, PixelFormats.Bgr24, null, 0);
+      JpegBitmapEncoder enc = new JpegBitmapEncoder(); enc.QualityLevel = 88;
+      enc.Frames.Add(BitmapFrame.Create(b));
+      string p = System.IO.Path.Combine(System.IO.Path.GetTempPath(), fileName);
+      using (System.IO.FileStream fs = new System.IO.FileStream(p, System.IO.FileMode.Create)) enc.Save(fs);
+      return p;
+    }
+
+    // ---------- presse-papiers ----------
+    void ReadClip() {
+      System.Windows.IDataObject d = null;
+      for (int i = 0; i < 3 && d == null; i++) {
+        try { d = Clipboard.GetDataObject(); } catch { System.Threading.Thread.Sleep(40); }
+      }
+      if (d == null) return;
+      // contenu marqué « privé » par les gestionnaires de mots de passe : on ne le regarde pas
+      if (d.GetDataPresent("ExcludeClipboardContentFromMonitorProcessing") || d.GetDataPresent("Clipboard Viewer Ignore")) { ClearClip(); return; }
+      try {
+        if (d.GetDataPresent("CanIncludeInClipboardHistory")) {
+          System.IO.MemoryStream ms = d.GetData("CanIncludeInClipboardHistory") as System.IO.MemoryStream;
+          if (ms != null && ms.Length >= 4 && BitConverter.ToInt32(ms.ToArray(), 0) == 0) { ClearClip(); return; }
+        }
+      } catch { }
+      // fichier copié dans l'Explorateur
+      if (d.GetDataPresent(DataFormats.FileDrop)) {
+        string[] files = d.GetData(DataFormats.FileDrop) as string[];
+        if (files != null && files.Length > 0 && Array.IndexOf(DropTypes, System.IO.Path.GetExtension(files[0]).ToLowerInvariant()) >= 0) {
+          string f = files[0];
+          List<string[]> ch = new List<string[]>();
+          ch.Add(new[] { "Ranger avec Nox", "file:" + f });
+          if (System.IO.Path.GetExtension(f).ToLowerInvariant() == ".pdf") ch.Add(new[] { "Résumer", "filecap:Résume ce document en quelques lignes : de quoi il s'agit, ce qu'on attend de moi et avant quand.\u001f" + f });
+          else ch.Add(new[] { "Que dit cette image ?", "filecap:Que montre cette image ? Résume l'essentiel.\u001f" + f });
+          SetClip("Fichier copié", "", System.IO.Path.GetFileName(f), null, ch);
+        }
+        return;
+      }
+      // capture d'écran (Win+Maj+S) ou image copiée
+      if (d.GetDataPresent(DataFormats.Bitmap)) {
+        BitmapSource bmp = null;
+        try { bmp = Clipboard.GetImage(); } catch { }
+        if (bmp != null) {
+          bmp.Freeze();
+          clipBitmap = bmp;
+          List<string[]> ch = new List<string[]>();
+          ch.Add(new[] { "Ranger avec Nox", "img:" });
+          ch.Add(new[] { "Que dit cette image ?", "img:Que montre cette image ? Résume l'essentiel et dis-moi s'il y a quelque chose à faire." });
+          SetClip("Capture", "", string.Format("Image {0} × {1}", bmp.PixelWidth, bmp.PixelHeight), bmp, ch);
+        }
+        return;
+      }
+      string t = null;
+      try { t = d.GetData(DataFormats.UnicodeText) as string; } catch { }
+      if (t == null) return;
+      t = t.Trim();
+      if (t.Length < 3 || t.Length > 20000 || Sensitive(t)) { ClearClip(); return; }
+      Suggest(t);
+    }
+
+    static readonly System.Text.RegularExpressions.RegexOptions RxOpt = System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant;
+    static bool Rx(string s, string pattern) { return System.Text.RegularExpressions.Regex.IsMatch(s, pattern, RxOpt); }
+    static bool Luhn(string digits) {
+      int sum = 0; bool alt = false;
+      for (int i = digits.Length - 1; i >= 0; i--) { int n = digits[i] - '0'; if (alt) { n *= 2; if (n > 9) n -= 9; } sum += n; alt = !alt; }
+      return sum % 10 == 0;
+    }
+    // données sensibles : jamais proposées à Nox
+    static bool Sensitive(string t) {
+      string c = t.Replace(" ", "").Replace("-", "");
+      if (Rx(c, @"^\d{13,19}$") && Luhn(c)) return true;                       // carte bancaire
+      if (Rx(c, @"^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$")) return true;                 // IBAN
+      if (Rx(t, @"^\d{4,8}$")) return true;                                      // code reçu par SMS
+      if (Rx(t, @"(mot de passe|password|passwd|\bmdp\b|api[_ -]?key|secret|token|-----BEGIN|\bsk-[a-z0-9])")) return true;
+      bool single = !Rx(t, @"\s");
+      if (single && t.Length >= 8 && t.Length <= 100 && !Rx(t, @"^https?://") && Rx(t, "[a-z]") && Rx(t, "[A-Z]") && Rx(t, @"\d") && Rx(t, @"[^A-Za-z0-9]")) return true;   // mot de passe probable
+      if (single && t.Length >= 24 && Rx(t, @"^[A-Za-z0-9_\-\.=+/]+$") && Rx(t, "[a-z]") && Rx(t, "[A-Z]") && Rx(t, @"\d")) return true;   // jeton ou clé
+      return false;
+    }
+    static readonly string[] Shops = { "amazon.", "fnac.", "darty.", "boulanger.", "cdiscount.", "ldlc.", "leboncoin.", "vinted.", "ikea.", "decathlon.",
+      "apple.com", "samsung.com", "backmarket.", "rakuten.", "materiel.net", "aliexpress.", "zalando.", "leroymerlin.", "castorama.", "e.leclerc", "carrefour.", "auchan.", "manomano.", "temu.", "shein." };
+
+    void Suggest(string t) {
+      string one = t.Replace("\r", " ").Replace("\n", " ").Trim();
+      string shortT = one.Length > 300 ? one.Substring(0, 300) : one;
+      List<string[]> ch = new List<string[]>();
+      bool single = !Rx(one, @"\s");
+      // numéro de suivi
+      if (single && Rx(one, @"^[A-Z0-9]{10,26}$") && System.Text.RegularExpressions.Regex.Matches(one, @"\d").Count >= 6 && !Rx(one, @"^0[1-9]\d{8}$")) {
+        ch.Add(new[] { "Suivre ce colis", "Suis ce colis : " + one.ToUpperInvariant() });
+        SetClip("Numéro de suivi ?", "", one, null, ch); return;
+      }
+      // lien
+      if (single && Rx(one, @"^https?://\S+$")) {
+        string host = "";
+        try { host = new Uri(one).Host.ToLowerInvariant(); } catch { }
+        bool shop = false;
+        foreach (string s in Shops) if (host.Contains(s)) shop = true;
+        if (shop) ch.Add(new[] { "Surveiller le prix", "Surveille le prix de ce produit et préviens-moi s'il baisse : " + one });
+        ch.Add(new[] { "Résumer la page", "Lis cette page et résume-la-moi en quelques lignes : " + one });
+        SetClip(shop ? "Lien vers un produit" : "Lien", "", host.Length > 0 ? host : one, null, ch); return;
+      }
+      bool addr = Rx(one, @"\b\d{1,4}\s*(bis|ter)?,?\s+(rue|avenue|av\.?|boulevard|bd|chemin|place|all[ée]e|impasse|route|quai|cours|square|rond-point|voie|lieu-dit)\b") && one.Length <= 250;
+      bool date = one.Length <= 800 && Rx(one, @"\b(\d{1,2}[/.]\d{1,2}([/.]\d{2,4})?|\d{1,2}\s?h\s?\d{0,2}|\d{1,2}:\d{2}|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|demain|apr[eè]s-demain|\d{1,2}(er)?\s+(janvier|f[eé]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[eé]cembre))\b");
+      if (date) ch.Add(new[] { "Ajouter à l'agenda", "Ajoute ceci à mon agenda (demande-moi si un détail manque) : « " + shortT + " »" });
+      if (addr) {
+        ch.Add(new[] { "Temps de trajet", "Combien de temps me faut-il pour aller à cette adresse : " + shortT + " ?" });
+        ch.Add(new[] { "Ouvrir le plan", "open:https://www.google.com/maps/search/?api=1&query=" + Uri.EscapeDataString(shortT) });
+      }
+      if (date || addr) { SetClip(date && addr ? "Rendez-vous ?" : addr ? "Adresse" : "Date", date ? "" : "", one, null, ch); return; }
+      // texte quelconque
+      if (one.Length <= 160) {
+        if (one.EndsWith("?")) ch.Add(new[] { "Demander à Nox", one });
+        ch.Add(new[] { "Créer une tâche", "Ajoute une tâche : " + one });
+        SetClip("Texte", "", one, null, ch); return;
+      }
+      string body = t.Length > 4000 ? t.Substring(0, 4000) : t;
+      ch.Add(new[] { "Résumer", "Résume ce texte en quelques lignes et dis-moi s'il y a quelque chose à faire : « " + body + " »" });
+      SetClip("Texte long", "", one, null, ch);
+    }
+
+    void SetClip(string kind, string glyph, string text, BitmapSource img, List<string[]> chips) {
+      clipAt = DateTime.Now;
+      if (img == null) clipBitmap = null;
+      clipEmpty.Visibility = Visibility.Collapsed;
+      ((FrameworkElement)clipIconBox.Parent).Visibility = Visibility.Visible;
+      clipKindTb.Text = kind;
+      clipTextTb.Text = text.Length > 200 ? text.Substring(0, 200) + "…" : text;
+      clipGlyph.Text = glyph; clipGlyph.Visibility = img == null ? Visibility.Visible : Visibility.Collapsed;
+      clipImg.Source = img; clipImg.Visibility = img == null ? Visibility.Collapsed : Visibility.Visible;
+      clipChips.Children.Clear();
+      int i = 0;
+      foreach (string[] c in chips) {
+        if (i >= 3) break;
+        string action = c[1];
+        clipChips.Children.Add(SideChip(c[0], i == 0, delegate { Safe("action", delegate { SideAct(action); }); }));
+        i++;
+      }
+      clipChips.Visibility = Visibility.Visible;
+      Log("presse-papiers : " + kind);   // le type seulement, jamais le contenu
+      Safe("panneau", SideRefresh);
+      // la poignée prend la couleur un instant pour signaler qu'il y a quelque chose
+      if (!sideOpen) {
+        sideHandle.BeginAnimation(FrameworkElement.WidthProperty, null);
+        DoubleAnimation w = new DoubleAnimation(4, 7, TimeSpan.FromMilliseconds(260)); w.AutoReverse = true; w.RepeatBehavior = new RepeatBehavior(2);
+        sideHandle.BeginAnimation(FrameworkElement.WidthProperty, w);
+      }
+    }
+    void ClearClip() {
+      clipAt = DateTime.MinValue; clipBitmap = null;
+      clipEmpty.Visibility = Visibility.Visible;
+      ((FrameworkElement)clipIconBox.Parent).Visibility = Visibility.Collapsed;
+      clipChips.Children.Clear(); clipChips.Visibility = Visibility.Collapsed;
+      clipImg.Source = null;
+    }
+
+    Button SideChip(string label, bool primary, RoutedEventHandler click) {
+      Button b = new Button();
+      b.Style = (Style)win.FindResource("Chip");
+      Color a = sideAccent == Colors.Transparent ? Rgb("#849C8B") : sideAccent;
+      if (primary) b.Background = Br(Color.FromArgb(0x59, a.R, a.G, a.B));
+      b.Margin = new Thickness(0, 0, 6, 6);
+      TextBlock tb = new TextBlock(); tb.Text = label; tb.FontSize = 12; b.Content = tb;
+      b.Click += click;
+      return b;
+    }
+
+    void SideAct(string a) {
+      if (a.StartsWith("open:")) { Run(a.Substring(5)); return; }
+      if (a.StartsWith("file:")) { SendFile(a.Substring(5), ""); return; }
+      if (a.StartsWith("filecap:")) { string[] pp = a.Substring(8).Split('\u001f'); SendFile(pp[1], pp[0]); return; }
+      if (a.StartsWith("img:")) {
+        if (clipBitmap == null) return;
+        string path = SaveJpeg(clipBitmap, "nox_capture.jpg");
+        SendFile(path, a.Substring(4));
+        return;
+      }
+      if (!NoxReady()) return;
+      NoxCmd("send:" + a);
+      BeginWait(a.Length > 70 ? a.Substring(0, 70) + "…" : a);
+    }
+
+    // ---------- réponse de Nox ----------
+    void BeginWait(string what) {
+      Hashtable n = G(sync, "nox") as Hashtable;
+      Hashtable last = n == null ? null : G(n, "last") as Hashtable;
+      waitAfterId = last == null ? "" : Str(G(last, "id"));
+      sideWaiting = true; waitSince = DateTime.Now; replyKey = "";
+      ShowReply("Envoyé à Nox · il réfléchit…", what, null);
+      replyText.Foreground = Br("#8E8E93");
+    }
+    void ShowReply(string head, string text, List<string[]> btns) {
+      replyCard.Visibility = Visibility.Visible;
+      replyHead.Text = head;
+      replyText.Text = text; replyText.Foreground = Brushes.White;
+      replyBtns.Children.Clear();
+      if (btns != null) foreach (string[] b in btns) {
+        string[] bb = b;
+        replyBtns.Children.Add(SideChip(bb[0], replyBtns.Children.Count == 0, delegate { Safe("bouton", delegate { ReplyButton(bb); }); }));
+      }
+      replyBtns.Visibility = replyBtns.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+      if (!sideOpen) return;
+      replyCard.Opacity = 0; Anim(replyCard, UIElement.OpacityProperty, 1, 220, 0, null);
+    }
+    void ReplyButton(string[] b) {
+      // b = { libellé, type, valeur, id }
+      if (b[1] == "conf") NoxCmd("confirm:" + b[2] + ":" + b[3]);
+      else NoxCmd("bouton:" + b[3] + "\u001f" + b[2]);
+      Hashtable n = G(sync, "nox") as Hashtable;
+      Hashtable last = n == null ? null : G(n, "last") as Hashtable;
+      waitAfterId = last == null ? "" : Str(G(last, "id"));
+      sideWaiting = true; waitSince = DateTime.Now; replyKey = "";
+      replyBtns.Children.Clear(); replyBtns.Visibility = Visibility.Collapsed;
+      replyHead.Text = "Nox s'en occupe…";
+    }
+    void SideReply() {
+      Hashtable n = G(sync, "nox") as Hashtable;
+      if (n == null) return;
+      Hashtable last = G(n, "last") as Hashtable;
+      Hashtable conf = G(n, "confirm") as Hashtable;
+      string id = last == null ? "" : Str(G(last, "id"));
+      if (sideWaiting) {
+        if (id.Length > 0 && id != waitAfterId) sideWaiting = false;
+        else {
+          if ((DateTime.Now - waitSince).TotalSeconds > 90) { sideWaiting = false; ShowReply("Pas de réponse", "Nox n'a pas répondu à temps. Regarde dans l'onglet Nox de la pilule.", null); }
+          return;
+        }
+      }
+      if (last == null) return;
+      string key = id + "|" + (conf == null ? "" : Str(G(conf, "jeton")));
+      if (key == replyKey) return;
+      replyKey = key;
+      List<string[]> btns = new List<string[]>();
+      if (conf != null) {
+        btns.Add(new[] { "Confirmer", "conf", "1", Str(G(conf, "jeton")) });
+        btns.Add(new[] { "Annuler", "conf", "0", Str(G(conf, "jeton")) });
+      }
+      IEnumerable bs = G(last, "boutons") as IEnumerable;
+      if (bs != null && !(bs is string)) foreach (object o in bs) {
+        Hashtable b = U(o) as Hashtable;
+        if (b != null && btns.Count < 4) btns.Add(new[] { Str(G(b, "l")), "btn", Str(G(b, "a")), id });
+      }
+      string txt = Str(G(last, "texte")).Replace("**", "").Trim();
+      if (txt.Length == 0 && conf != null) txt = Str(G(conf, "description"));
+      ShowReply("Nox · " + NiceTime(Str(G(last, "heure"))), txt, btns);
+    }
 
     // ---------------- État du PC (au-dessus des raccourcis) ----------------
     string[] sysNames = { "Processeur", "Mémoire", "Graphique", "Disque" };
@@ -2840,12 +3387,13 @@ $noxScript = {
       # ordres venus de la pilule
       $c = $null
       while ($sync.noxcmds.TryDequeue([ref]$c)) {
-        if ($c -like 'file:*') {
-          $path = $c.Substring(5)
+        if ($c -like 'file:*' -or $c -like 'filecap:*') {
+          $caption = ''
+          if ($c -like 'filecap:*') { $pp = $c.Substring(8).Split([char]0x1f, 2); $caption = $pp[0]; $path = $pp[1] } else { $path = $c.Substring(5) }
           $ext = [System.IO.Path]::GetExtension($path).ToLower()
           $mime = @{ '.pdf' = 'application/pdf'; '.jpg' = 'image/jpeg'; '.jpeg' = 'image/jpeg'; '.png' = 'image/png'; '.webp' = 'image/webp'; '.gif' = 'image/gif' }[$ext]
           $b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($path))
-          $pending += Post-Json '/api/conversation' @{ texte = ''; image = @{ type = $mime; donnees = $b64 } }
+          $pending += Post-Json '/api/conversation' @{ texte = $caption; image = @{ type = $mime; donnees = $b64 } }
           NLog ("fichier envoyé à Nox : " + [System.IO.Path]::GetFileName($path))
         }
         elseif ($c -like 'bouton:*') {
