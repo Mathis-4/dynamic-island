@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.32'
+$Version = '4.33'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -20,7 +20,6 @@ if ($NoxStatusUrl -and -not $NoxUrl) { $NoxUrl = '' }   # ancien réglage, plus 
 $UpdateRepo = 'Mathis-4/dynamic-island'
 $LogPath = Join-Path $Here 'island.log'
 $SkipPath = Join-Path $Here 'skip.txt'
-try { Set-Content -Path $LogPath -Value "Dynamic Island v$Version - $(Get-Date)" -Encoding UTF8 } catch {}
 function Log($m) { try { Add-Content -Path $LogPath -Value ("{0:HH:mm:ss} PS  {1}" -f (Get-Date), $m) -Encoding UTF8 } catch {} }
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -31,6 +30,8 @@ $script:mutex = New-Object System.Threading.Mutex($false, "Global\MathisDynamicI
 $owned = $false
 try { $owned = $script:mutex.WaitOne(8000) } catch { $owned = $true }   # ancienne pilule fermée brutalement
 if (-not $owned) { Log 'une autre pilule tourne déjà'; exit }
+# le journal n'est remis à zéro qu'une fois la place prise (sinon une 2e pilule effaçait celui de la 1re)
+try { Set-Content -Path $LogPath -Value "Dynamic Island v$Version - $(Get-Date)" -Encoding UTF8 } catch {}
 
 function Restart-Island {
   try { $script:mutex.ReleaseMutex() } catch {}
