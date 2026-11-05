@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.41'
+$Version = '4.42'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -2296,7 +2296,7 @@ namespace Island {
       bool sp = md != null && AppName(Str(G(md, "app"))) == "Spotify";
       Hashtable n = G(sync, "nox") as Hashtable;
       bool noxOk = n != null && Bool(G(n, "ok"));
-      E<Button>("BLike").Visibility = sp && noxOk && likeAvailable ? Visibility.Visible : Visibility.Collapsed;
+      E<Button>("BLike").Visibility = sp && noxOk ? Visibility.Visible : Visibility.Collapsed;   // toujours visible sur Spotify (grisé tant que l'état n'est pas connu)
       if (!sp) { likeTrack = ""; return; }
       string title = Str(G(md, "title"));
       if (title != likeTrack) {
@@ -2313,11 +2313,12 @@ namespace Island {
       string err = Str(G(r, "err")), t = Str(G(r, "titre"));
       if (err.Length > 0) {
         if (likePending) { likePending = false; liked = !liked; LikeLook(liked, likeKnown); }
+        Log("like : " + err);
         if (err.Contains("connexion_spotify")) ShowPeek(null, "", "#FFFFFF", "#1C1C1E", "Spotify", "Likes pas encore autorisés", "Une commande à lancer une fois sur le serveur", 5000, false);
-        else if (err.Contains("aucun titre") && likeTries < 3) likeQueryAt = DateTime.Now.AddSeconds(2);
-        else Log("like : " + err);
+        else if (likeTries < 3) likeQueryAt = DateTime.Now.AddSeconds(3);
         return;
       }
+      if (!likeAvailable) Log("like : état reçu de Nox");
       likeAvailable = true;
       if (t.Length > 0 && !SameTitle(t, likeTrack)) {   // Spotify parle encore du titre précédent
         if (likeTries < 4) likeQueryAt = DateTime.Now.AddSeconds(2);
@@ -2339,7 +2340,7 @@ namespace Island {
       E<Button>("BLike").ToolTip = on ? "Retirer des Titres likés" : "Ajouter aux Titres likés";
     }
     void ToggleLike() {
-      if (!likeKnown) return;   // état pas encore connu : pas de clic à l'aveugle
+      if (!likeKnown) { likeTries = 0; likeQueryAt = DateTime.Now; return; }   // état pas encore connu : on le redemande, pas de clic à l'aveugle
       liked = !liked; likePending = true;
       LikeLook(liked, true);
       TextBlock ico = E<TextBlock>("BLikeIco");
