@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.48'
+$Version = '4.49'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -11,6 +11,8 @@ $DefaultAccent    = "#D97B6B"  # terracotta Nox (charte ; avant : violet) — la
 $TimerColor       = "#FF9F0A"
 $ChargeColor      = "#30D158"
 $HideInFullscreen = $true
+$WindowsNotifs    = $true      # notifications Windows (WhatsApp, Lien avec Windows…) affichées dans la pilule
+$NotifIgnore      = @('Spotify')   # applis dont on n'affiche pas les notifications (nom tel qu'affiché par Windows)
 $ChromeAdresse    = $true      # Chrome / Edge au premier plan : la pilule descend sur la barre d'adresse (sous les onglets)
 $ChromeDecalage   = 46         # haut de la pilule sous le bord de Chrome agrandi (4.47 : 37 → 46, centrée sur la barre d'adresse) (à ajuster dans config.ps1 si besoin)
 # ------------------------------
@@ -1431,6 +1433,7 @@ namespace Island {
       Safe("volume", UpdateVolume);
       Safe("musique", UpdateMedia);
       Safe("like", LikeTick);
+      Safe("notifications", NotifTick);
       if (tickN % 5 == 1) Safe("minuteur", UpdateTimer);
       if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
       if (tickN % 10 == 3) Safe("appareils", WatchDevices);
@@ -2362,6 +2365,32 @@ namespace Island {
       }
     }
     void Run(string what) { System.Diagnostics.Process.Start(what); }
+
+    // ---------------- notifications Windows (WhatsApp, Snapchat, Lien avec Windows…) ----------------
+    List<object[]> notifWait = new List<object[]>();   // { notification, heure d'arrivée }
+    void NotifTick() {
+      System.Collections.Concurrent.ConcurrentQueue<object> q = G(sync, "winnotifs") as System.Collections.Concurrent.ConcurrentQueue<object>;
+      if (q == null) return;
+      object o;
+      while (q.TryDequeue(out o)) { Hashtable h = U(o) as Hashtable; if (h != null) notifWait.Add(new object[] { h, DateTime.Now }); }
+      DateTime now = DateTime.Now;
+      notifWait.RemoveAll(delegate(object[] x) { return (now - (DateTime)x[1]).TotalSeconds > 60; });   // trop vieille : on laisse tomber
+      if (notifWait.Count == 0 || expandedOn || typing || talking || hiddenFs || now < peekUntil) return;
+      if (notifWait.Count > 3) {   // rafale : un seul résumé
+        List<string> apps = new List<string>();
+        foreach (object[] x in notifWait) { string a = Str(G((Hashtable)x[0], "app")); if (!apps.Contains(a)) apps.Add(a); }
+        ShowPeek(null, "", "#FFFFFF", "#2C2C2E", "Notifications", notifWait.Count + " nouvelles notifications", string.Join(", ", apps.ToArray()), 4500, false);
+        notifWait.Clear(); Refresh(); return;
+      }
+      Hashtable n = (Hashtable)notifWait[0][0];
+      notifWait.RemoveAt(0);
+      string app = Str(G(n, "app")), title = Str(G(n, "title")), body = Str(G(n, "body"));
+      if (title.Length == 0) title = app;
+      if (title.Length > 60) title = title.Substring(0, 59).TrimEnd() + "…";
+      if (body.Length > 90) body = body.Substring(0, 89).TrimEnd() + "…";
+      ShowPeek(G(n, "logo") as ImageSource, "", "#FFFFFF", "#2C2C2E", app, title, body, 4500, false);
+      Refresh();
+    }
 
     // ---------------- cœur Spotify : liker le titre en cours (par Nox, API Spotify) ----------------
     string likeTrack = ""; bool liked, likeKnown, likeAvailable, likePending; DateTime likeQueryAt = DateTime.MaxValue; int likeTries; double likeSeen;
@@ -3581,6 +3610,7 @@ $sync = [hashtable]::Synchronized(@{
   stop = $false; media = $null; playing = $false; timeline = $null; nox = $null; noxUrl = $null
   cmds = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
   noxcmds = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+  winnotifs = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
   logPath = $LogPath; accent = $DefaultAccent; dir = $Here; version = $Version
   updateRepo = $UpdateRepo; updated = $null; skipPath = $SkipPath; restart = $false
 })
@@ -3969,6 +3999,80 @@ $noxScript = {
   }
 }
 
+# ============================================================
+#  Fil 3 : notifications Windows (WhatsApp, Snapchat, Lien avec Windows…) → pilule
+#  Lues sur ce PC seulement : rien n'est envoyé ailleurs ; le journal ne garde que le nom de l'appli.
+# ============================================================
+$notifScript = {
+  param($sync, $ignore)
+  function NotLog($m) { try { Add-Content -Path $sync.logPath -Value ("{0:HH:mm:ss} NOT {1}" -f (Get-Date), $m) -Encoding UTF8 } catch {} }
+  try {
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime, PresentationCore, WindowsBase
+    $asTaskN = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+      $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+    function Await($op, [Type]$t) {
+      $task = $asTaskN.MakeGenericMethod($t).Invoke($null, @($op))
+      if ($task.Wait(3000)) { return $task.Result }
+      return $null
+    }
+    $null = [Windows.UI.Notifications.Management.UserNotificationListener,Windows.UI.Notifications,ContentType=WindowsRuntime]
+    $null = [Windows.Storage.Streams.IRandomAccessStreamWithContentType,Windows.Storage.Streams,ContentType=WindowsRuntime]
+    $tList = [System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]]
+    $tStream = [Windows.Storage.Streams.IRandomAccessStreamWithContentType]
+    $listener = [Windows.UI.Notifications.Management.UserNotificationListener]::Current
+    $acc = [string]$listener.GetAccessStatus()
+    if ($acc -ne 'Allowed') { NotLog ("accès aux notifications Windows : " + $acc + " (Paramètres > Confidentialité > Notifications)"); return }
+    NotLog 'notifications Windows relayées dans la pilule'
+  } catch { NotLog ("init : " + $_.Exception.Message); return }
+
+  $seen = New-Object 'System.Collections.Generic.HashSet[uint32]'
+  $first = $true; $logos = @{}
+  while (-not $sync.stop) {
+    try {
+      $list = Await ($listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)) $tList
+      if ($list) {
+        $now = [DateTimeOffset]::Now
+        foreach ($n in $list) {
+          if (-not $seen.Add([uint32]$n.Id)) { continue }
+          if ($first) { continue }                                        # celles déjà là au démarrage : pas rejouées
+          if (($now - $n.CreationTime).TotalSeconds -gt 90) { continue }
+          $app = [string]$n.AppInfo.DisplayInfo.DisplayName
+          if ($ignore -contains $app) { continue }
+          $title = ''; $body = ''
+          try {
+            $b = $n.Notification.Visual.GetBinding([Windows.UI.Notifications.KnownNotificationBindings]::ToastGeneric)
+            if ($b) {
+              $texts = @($b.GetTextElements() | ForEach-Object { [string]$_.Text } | Where-Object { $_ })
+              if ($texts.Count -gt 0) { $title = $texts[0] }
+              if ($texts.Count -gt 1) { $body = ($texts[1..($texts.Count - 1)] -join ' · ') }
+            }
+          } catch {}
+          if (-not $logos.ContainsKey($app)) {
+            $logo = $null
+            try {
+              $ref = $n.AppInfo.DisplayInfo.GetLogo([Windows.Foundation.Size]::new(64, 64))
+              $ras = Await ($ref.OpenReadAsync()) $tStream
+              if ($ras) {
+                $bytes = [Island.Img]::ReadAll($ras)
+                $ms = New-Object System.IO.MemoryStream (,$bytes)
+                $bmp = [System.Windows.Media.Imaging.BitmapImage]::new()
+                $bmp.BeginInit(); $bmp.CacheOption = 'OnLoad'; $bmp.DecodePixelWidth = 64; $bmp.StreamSource = $ms; $bmp.EndInit(); $bmp.Freeze()
+                $logo = $bmp
+              }
+            } catch {}
+            $logos[$app] = $logo
+          }
+          $sync.winnotifs.Enqueue(@{ app = $app; title = $title; body = $body; logo = $logos[$app] })
+          NotLog ("notification : " + $app)                               # le nom de l'appli seulement, jamais le message
+        }
+        if ($seen.Count -gt 500) { $seen.Clear(); foreach ($n in $list) { $null = $seen.Add([uint32]$n.Id) } }
+        $first = $false
+      }
+    } catch { NotLog ("lecture : " + $_.Exception.Message); Start-Sleep -Milliseconds 5000 }
+    Start-Sleep -Milliseconds 1500
+  }
+}
+
 function Start-Worker($sb, $args2) {
   $rs = [runspacefactory]::CreateRunspace()
   $rs.ApartmentState = 'MTA'
@@ -3984,6 +4088,7 @@ $workers = @(
   (Start-Worker $mediaScript @($sync)),
   (Start-Worker $noxScript @($sync, $NoxUrl))
 )
+if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIgnore))) }
 
 # ============================================================
 #  Interface
