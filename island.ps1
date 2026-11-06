@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.49'
+$Version = '4.50'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -881,7 +881,7 @@ namespace Island {
     Path edgePath; GradientBrush edgeBrush; GradientStop edgeTop, edgeMid, edgeLow;
     bool noxUnread, peeking, tilted; string clockShown = ""; string eyeModeShown = ""; string lastSong = "";
     double compactW = 160, stickyH = 0, expNatural = 0; string expKey = ""; Size peekSize = new Size(300, 60);
-    bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false;
+    bool firstTrack = true, eqOn = false, ringIsTimer = false, peekIsConfirm = false, peekIsSms = false;
     DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
     double vol = -2; bool muted = false; int battPct = 100; bool? power = null; bool lowWarned = false;
     string noxMsgId = null; bool noxSeen = false; string noxState = "";
@@ -995,6 +995,8 @@ namespace Island {
       win.DragEnter += OnDrag; win.DragOver += OnDrag; win.Drop += OnDrop;
       Click("BPeekOk", delegate { Confirm(true); peekUntil = DateTime.MinValue; Refresh(); });
       Click("BPeekNo", delegate { Confirm(false); peekUntil = DateTime.MinValue; Refresh(); });
+      Click("BSmsReply", delegate { StartSmsReply(); });
+      Click("BSmsX", delegate { smsNom = ""; replyOn = false; UpdateSmsReply(); Refresh(); });
       TextBox input = E<TextBox>("NInput");
       input.PreviewMouseLeftButtonDown += delegate { StartTyping(); };
       input.TextChanged += delegate { E<UIElement>("NPh").Visibility = input.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed; };
@@ -1240,7 +1242,7 @@ namespace Island {
       if (!on) { stickyH = 0; expKey = ""; }
       if (on) {
         bool playing = Playing();
-        if (DateTime.Now < peekUntil && (peekIsConfirm || E<TextBlock>("PApp").Text == "Nox")) { peekUntil = DateTime.MinValue; ShowPage("PgNox", 0); }
+        if (DateTime.Now < peekUntil && (peekIsConfirm || E<TextBlock>("PApp").Text == "Nox" || peekIsSms)) { peekUntil = DateTime.MinValue; ShowPage("PgNox", 0); }
         else ShowPage(Playing() ? "PgMusic" : "PgNox", 0);   // musique en cours -> Musique, sinon Nox (au milieu)
       }
       bool fly = on && page == "PgMusic" && Playing() && layer == "Compact";
@@ -1285,6 +1287,7 @@ namespace Island {
     void StopTyping() {
       if (!typing) return;
       typing = false;
+      if (replyOn && E<TextBox>("NInput").Text.Trim().Length == 0) { replyOn = false; UpdateSmsReply(); }   // rien tapé : on revient à Nox
       Keyboard.ClearFocus();
       Win.NoActivate(hwnd, true);
       Hover();
@@ -1444,6 +1447,7 @@ namespace Island {
       if (tickN % 10 == 1) {
         Safe("batterie", delegate { if (!ringIsTimer) UpdateBattery(); });
         Safe("nox", UpdateNox);
+        Safe("réponse SMS", UpdateSmsReply);
         Safe("plein écran", CheckFullscreen);
         Rect wa = SystemParameters.WorkArea;
         if (Math.Abs(win.Left - (wa.Left + (wa.Width - win.Width) / 2)) > 1) Place();
@@ -1485,7 +1489,7 @@ namespace Island {
         if (!l.Contains(page)) ShowPage(l[0], 0);
         else if (string.Join(",", l.ToArray()) != tabOrder) ShowPage(page, 0);
         // la vue ne rétrécit pas tant que la souris est dessus (sinon elle se refermerait sous le curseur)
-        string ek = page + "|" + agendaRev + "|" + houseRev + "|" + VisKey("NConfirm") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
+        string ek = page + "|" + agendaRev + "|" + houseRev + "|" + VisKey("NConfirm") + VisKey("NSms") + VisKey("BSmsReply") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
         if (ek != expKey) { expKey = ek; expanded.Height = double.NaN; expNatural = Math.Ceiling(Natural(expanded, 440).Height); }
         stickyH = expNatural;   // chaque widget a sa hauteur (plus de vide) ; un délai de grâce évite la fermeture sous le curseur
         expanded.Height = stickyH;
@@ -1829,6 +1833,7 @@ namespace Island {
       Vis("PSub", !string.IsNullOrEmpty(sub));
       Vis("PButtons", confirm);
       peekIsConfirm = confirm;
+      peekIsSms = false;
       peekUntil = DateTime.Now.AddMilliseconds(ms);
     }
     void SetArt(string box, ImageSource art) {
@@ -2116,6 +2121,15 @@ namespace Island {
       TextBox input = E<TextBox>("NInput");
       string t = input.Text.Trim();
       if (t.Length == 0) return;
+      if (replyOn && smsNom.Length > 0) {   // réponse SMS : Nox prépare, rien ne part avant « Confirmer »
+        NoxCmd("smsrep:" + smsNom + "\u001f" + smsExtrait + "\u001f" + t);
+        input.Text = "";
+        E<TextBlock>("NLast").Text = "SMS pour " + smsNom + " : " + t + " · confirme pour l'envoyer";
+        Vis("NLastBox", true);
+        smsNom = ""; replyOn = false; UpdateSmsReply();
+        StopTyping();
+        return;
+      }
       NoxCmd("send:" + t);
       input.Text = "";
       E<TextBlock>("NLast").Text = "Envoyé : " + t;
@@ -2385,10 +2399,40 @@ namespace Island {
       Hashtable n = (Hashtable)notifWait[0][0];
       notifWait.RemoveAt(0);
       string app = Str(G(n, "app")), title = Str(G(n, "title")), body = Str(G(n, "body"));
+      Hashtable nx = G(sync, "nox") as Hashtable;
+      bool sms = PhoneApp(app) && title.Length > 0 && body.Length > 0 && nx != null && Bool(G(nx, "ok"));
+      if (sms) { smsNom = title.Length > 80 ? title.Substring(0, 80) : title; smsExtrait = body.Length > 300 ? body.Substring(0, 300) : body; smsAt = DateTime.Now; replyOn = false; }
       if (title.Length == 0) title = app;
       if (title.Length > 60) title = title.Substring(0, 59).TrimEnd() + "…";
       if (body.Length > 90) body = body.Substring(0, 89).TrimEnd() + "…";
-      ShowPeek(G(n, "logo") as ImageSource, "", "#FFFFFF", "#2C2C2E", app, title, body, 4500, false);
+      ShowPeek(G(n, "logo") as ImageSource, "", "#FFFFFF", "#2C2C2E", sms ? app + " · survole pour répondre" : app, title, body, sms ? 7000 : 4500, false);
+      peekIsSms = sms;
+      Refresh();
+    }
+
+    // ---------------- répondre à un SMS (notification « Mobile connecté ») ----------------
+    // La réponse passe par Nox : numéro du message reçu, puis Confirmer / Annuler comme tout SMS (rien ne part avant).
+    string smsNom = "", smsExtrait = ""; DateTime smsAt = DateTime.MinValue; bool replyOn;
+    static bool PhoneApp(string app) {
+      string a = (app ?? "").ToLowerInvariant();
+      return a.Contains("mobile connect") || a.Contains("lien avec windows") || a.Contains("phone link") || a.Contains("votre téléphone") || a.Contains("your phone");
+    }
+    void UpdateSmsReply() {
+      if (smsNom.Length > 0 && !replyOn && (DateTime.Now - smsAt).TotalMinutes > 15) smsNom = "";   // trop vieux : on n'y répond plus d'ici
+      bool show = smsNom.Length > 0;
+      Vis("NSms", show);
+      if (!show) { replyOn = false; E<TextBlock>("NPh").Text = "Écris à Nox, ou maintiens le micro pour lui parler"; return; }
+      E<TextBlock>("NSmsWho").Text = (replyOn ? "Réponse SMS à " : "SMS de ") + smsNom;
+      E<TextBlock>("NSmsText").Text = smsExtrait;
+      Vis("BSmsReply", !replyOn);
+      E<TextBlock>("NPh").Text = replyOn ? "Ta réponse à " + smsNom + ", puis Entrée" : "Écris à Nox, ou maintiens le micro pour lui parler";
+    }
+    void StartSmsReply() {
+      if (smsNom.Length == 0) return;
+      replyOn = true; smsAt = DateTime.Now;
+      UpdateSmsReply();
+      if (page != "PgNox") ShowPage("PgNox", 0);
+      StartTyping();
       Refresh();
     }
 
@@ -3903,6 +3947,10 @@ $noxScript = {
           NLog ("maison : " + $parts[1] + ' ' + $parts[2])
         }
         elseif ($c -like 'send:*') { $pending += Post-Json '/api/conversation' @{ texte = $c.Substring(5) }; NLog 'message envoyé à Nox' }
+        elseif ($c -like 'smsrep:*') {
+          $parts = $c.Substring(7).Split([char]0x1f, 3)
+          if ($parts.Count -eq 3) { $pending += Post-Json '/api/sms/repondre' @{ nom = $parts[0]; extrait = $parts[1]; texte = $parts[2] }; NLog 'réponse SMS préparée (à confirmer)' }
+        }
         elseif ($c -like 'confirm:*') {
           $parts = $c.Split(':', 3)
           $pending += Post-Json '/api/conversation/confirmer' @{ jeton = $parts[2]; oui = ($parts[1] -eq '1') }
@@ -4468,6 +4516,18 @@ if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIg
                     <Button x:Name="BConfOk" Style="{StaticResource Chip}" Background="#30D158"><TextBlock Text="Confirmer" FontSize="12"/></Button>
                   </StackPanel>
                   <TextBlock x:Name="NConfText" FontSize="12.5" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                </DockPanel>
+              </Border>
+              <Border x:Name="NSms" Margin="0,8,0,0" Background="#1A30D158" CornerRadius="12" Padding="12,7" Visibility="Collapsed">
+                <DockPanel>
+                  <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0,0,0">
+                    <Button x:Name="BSmsReply" Style="{StaticResource Chip}" Background="#30D158" Margin="0,0,6,0"><TextBlock Text="Répondre" FontSize="12"/></Button>
+                    <Button x:Name="BSmsX" Style="{StaticResource Chip}" ToolTip="Ne pas répondre"><TextBlock Text="&#xE711;" FontFamily="Segoe Fluent Icons" FontSize="10"/></Button>
+                  </StackPanel>
+                  <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="NSmsWho" FontSize="10.5" Foreground="#8E8E93" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="NSmsText" FontSize="12.5" Foreground="#E5E5EA" TextWrapping="Wrap" MaxHeight="34" TextTrimming="CharacterEllipsis"/>
+                  </StackPanel>
                 </DockPanel>
               </Border>
               <Border Margin="0,10,0,0" CornerRadius="17" Background="#1FFFFFFF" Height="34" Padding="14,0,3,0">
