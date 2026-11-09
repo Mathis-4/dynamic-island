@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.54'
+$Version = '4.55'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -266,12 +266,22 @@ namespace Island {
           || c == "NotifyIconOverflowWindow" || c == "TopLevelWindowForOverflowXamlIsland" || c == "XamlExplorerHostIslandWindow") return false;
       RECT mon; return Monitor(h, out m, out mon, out work);
     }
+    public static string ForegroundInfo() {
+      IntPtr h = GetForegroundWindow();
+      System.Text.StringBuilder sb = new System.Text.StringBuilder(64); GetClassName(h, sb, 64);
+      string n = "";
+      try { uint pid; GetWindowThreadProcessId(h, out pid); n = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; } catch { }
+      return n + " / " + sb.ToString();
+    }
     public static bool ForegroundIsFullscreen(int sw, int sh, IntPtr self) {
       IntPtr h = GetForegroundWindow();
       if (h == IntPtr.Zero || h == self) return false;
       System.Text.StringBuilder sb = new System.Text.StringBuilder(64); GetClassName(h, sb, 64);
       string c = sb.ToString();
       if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd") return false;
+      // v4.55 : une fenêtre simplement agrandie n'est pas du plein écran. Quand une barre comme Lumibar masque la
+      // barre des tâches, une fenêtre agrandie couvre tout l'écran et la pilule se cachait à tort.
+      if (IsZoomed(h)) return false;
       RECT r; if (!GetWindowRect(h, out r)) return false;
       IntPtr m; RECT mon, work;   // v4.54 : comparé à l'écran de la fenêtre (2e écran compris)
       if (Monitor(h, out m, out mon, out work))
@@ -1954,6 +1964,7 @@ namespace Island {
       bool fs = Win.ForegroundIsFullscreen(sw, sh, hwnd);
       if (fs == hiddenFs) return;
       hiddenFs = fs;
+      Log(fs ? "cachée : plein écran (" + Win.ForegroundInfo() + ")" : "visible : fin du plein écran");
       Anim(root, UIElement.OpacityProperty, fs ? 0 : 1, 220, 0, null);
       root.IsHitTestVisible = !fs;
     }
