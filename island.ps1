@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.52'
+$Version = '4.53'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -3498,12 +3498,11 @@ namespace Island {
     void OnSys(SysInfo s, bool full) {
       DateTime now = DateTime.Now;
       if (s.Top.Length > 0) { sysTopName = s.Top; sysTopAt = now; }
-      // alerte discrète si la mémoire ou le processeur restent saturés (jamais en plein écran)
+      // alerte discrète si le processeur reste saturé (jamais en plein écran) ; v4.53 : plus d'alerte mémoire (demande de Mathis)
       if (hiddenFs) { ramHighSince = null; cpuHighSince = null; }
       else {
-        if (s.Ram >= 90) { if (!ramHighSince.HasValue) ramHighSince = now; } else ramHighSince = null;
         if (s.Cpu >= 95) { if (!cpuHighSince.HasValue) cpuHighSince = now; } else cpuHighSince = null;
-        bool ramAlert = ramHighSince.HasValue && (now - ramHighSince.Value).TotalSeconds >= 30;
+        bool ramAlert = false;
         bool cpuAlert = cpuHighSince.HasValue && (now - cpuHighSince.Value).TotalSeconds >= 30;
         if ((ramAlert || cpuAlert) && now >= nextSysAlert && !expandedOn) {
           nextSysAlert = now.AddMinutes(15);
