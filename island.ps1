@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.55'
+$Version = '4.56'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -265,6 +265,11 @@ namespace Island {
       if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd" || c == "Windows.UI.Core.CoreWindow"
           || c == "NotifyIconOverflowWindow" || c == "TopLevelWindowForOverflowXamlIsland" || c == "XamlExplorerHostIslandWindow") return false;
       RECT mon; return Monitor(h, out m, out mon, out work);
+    }
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    // v4.56 : une autre barre (Lumibar…) ou un redémarrage de l'Explorateur peut repasser devant : on reprend la 1re place
+    public static void KeepTop(IntPtr h) {
+      if (h != IntPtr.Zero) SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200);   // TOPMOST, NOSIZE|NOMOVE|NOACTIVATE|NOOWNERZORDER
     }
     public static string ForegroundInfo() {
       IntPtr h = GetForegroundWindow();
@@ -1512,6 +1517,7 @@ namespace Island {
       if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
       if (tickN % 10 == 3) Safe("appareils", WatchDevices);
       if (tickN % 3 == 2) { Safe("écran", CheckMonitor); Safe("chrome", CheckBrowser); }
+      if (tickN % 50 == 25) Safe("premier plan", delegate { Win.KeepTop(hwnd); Win.KeepTop(sideHwnd); });
       if (tickN % 20 == 7) Safe("état du PC", PollSys);
       Safe("panneau", SideTick);
       Safe("anneaux", AnimateSys);
