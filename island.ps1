@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.50'
+$Version = '4.51'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -3283,6 +3283,8 @@ namespace Island {
       replyCard.Visibility = Visibility.Visible;
       replyHead.Text = head;
       replyText.Text = text; replyText.Foreground = Brushes.White;
+      string docHead = Safe2(delegate { return DocView(text); });
+      if (docHead != null) replyHead.Text = docHead + head.Replace("Nox", "");
       replyBtns.Children.Clear();
       if (btns != null) foreach (string[] b in btns) {
         string[] bb = b;
@@ -3291,6 +3293,55 @@ namespace Island {
       replyBtns.Visibility = replyBtns.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
       if (!sideOpen) return;
       replyCard.Opacity = 0; Anim(replyCard, UIElement.OpacityProperty, 1, 220, 0, null);
+    }
+    string Safe2(Func<string> f) { try { return f(); } catch (Exception ex) { Log("rangement : " + ex.Message); return null; } }
+    // v4.51 (demande de Mathis) : pour un document à ranger, la destination passe en premier, en gras ;
+    // le résumé de Nox (long) est retiré de la carte (il reste dans l'onglet Nox / Telegram)
+    static string After(string line, string mark) {
+      int i = line.IndexOf(mark, StringComparison.Ordinal);
+      return i < 0 ? null : line.Substring(i + mark.Length).Trim();
+    }
+    static string Court(string dossier) {
+      return dossier.StartsWith("base de données/") ? dossier.Substring(16) : dossier;
+    }
+    System.Windows.Documents.Run Ligne(string t, string color, double size, bool bold) {
+      System.Windows.Documents.Run r = new System.Windows.Documents.Run(t);
+      r.Foreground = Br(color); r.FontSize = size;
+      if (bold) r.FontWeight = FontWeights.SemiBold;
+      return r;
+    }
+    string DocView(string text) {
+      if (string.IsNullOrEmpty(text)) return null;
+      string[] lines = text.Replace("\r", "").Split('\n');
+      string dossier = null, nom = null, type = null, ech = null, lien = null; bool done = false;
+      foreach (string raw in lines) {
+        string l = raw.Trim();
+        if (l.Length == 0) continue;
+        if (l.StartsWith("\u2705 Rangé :")) { done = true; nom = After(l, "Rangé :"); }
+        else if (After(l, "Dossier :") != null) dossier = After(l, "Dossier :");
+        else if (After(l, "Nom :") != null) nom = After(l, "Nom :");
+        else if (l.StartsWith("\uD83D\uDCC2") && dossier == null) dossier = l.Substring(2).Trim();   // 📂 (message « Rangé »)
+        else if (l.StartsWith("\uD83C\uDFF7")) type = l.Substring(2).TrimStart('\uFE0F', ' ');           // 🏷️
+        else if (l.StartsWith("\u23F0")) ech = l.Substring(1).Replace("(te sera proposée après rangement)", "").Trim();
+        else if (l.StartsWith("\uD83D\uDD17")) lien = l.Substring(2).Trim();                           // 🔗
+      }
+      bool proposal = !done && dossier != null && nom != null && (text.Contains("Document reçu") || text.Contains("Vidéo reçue"));
+      if (!proposal && !(done && dossier != null)) return null;
+      replyText.Inlines.Clear();
+      replyText.Inlines.Add(Ligne("\uD83D\uDCC2 " + Court(dossier), "#FFFFFF", 14.5, true));
+      replyText.Inlines.Add(new System.Windows.Documents.LineBreak());
+      replyText.Inlines.Add(Ligne(nom ?? "", "#C7C7CC", 12, false));
+      if (ech != null) { replyText.Inlines.Add(new System.Windows.Documents.LineBreak()); replyText.Inlines.Add(Ligne("\u23F0 " + ech, "#FF9F0A", 11.5, false)); }
+      if (type != null) { replyText.Inlines.Add(new System.Windows.Documents.LineBreak()); replyText.Inlines.Add(Ligne(type, "#8E8E93", 11.5, false)); }
+      if (lien != null && lien.StartsWith("https://")) {
+        replyText.Inlines.Add(new System.Windows.Documents.LineBreak());
+        System.Windows.Documents.Hyperlink h = new System.Windows.Documents.Hyperlink(new System.Windows.Documents.Run("Ouvrir dans le Drive"));
+        h.Foreground = Br("#8FB3FF"); h.FontSize = 12;
+        string u = lien;
+        h.Click += delegate { try { System.Diagnostics.Process.Start(u); } catch (Exception ex) { Log("lien Drive : " + ex.Message); } };
+        replyText.Inlines.Add(h);
+      }
+      return done ? "Rangé" : "Nox propose de le ranger ici";
     }
     void ReplyButton(string[] b) {
       // b = { libellé, type, valeur, id }
