@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.56'
+$Version = '4.57'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -286,7 +286,9 @@ namespace Island {
       if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd") return false;
       // v4.55 : une fenêtre simplement agrandie n'est pas du plein écran. Quand une barre comme Lumibar masque la
       // barre des tâches, une fenêtre agrandie couvre tout l'écran et la pilule se cachait à tort.
-      if (IsZoomed(h)) return false;
+      // v4.57 : mais une vidéo YouTube en plein écran garde Chrome « agrandi » ; ce qui la distingue : le plein écran
+      // retire le bord redimensionnable (WS_THICKFRAME). Agrandie AVEC bord = fenêtre normale ; sans bord = plein écran.
+      if (IsZoomed(h) && (GetWindowLong(h, -16) & 0x00040000) != 0) return false;
       RECT r; if (!GetWindowRect(h, out r)) return false;
       IntPtr m; RECT mon, work;   // v4.54 : comparé à l'écran de la fenêtre (2e écran compris)
       if (Monitor(h, out m, out mon, out work))
