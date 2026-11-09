@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.51'
+$Version = '4.52'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -886,8 +886,8 @@ namespace Island {
     double vol = -2; bool muted = false; int battPct = 100; bool? power = null; bool lowWarned = false;
     string noxMsgId = null; bool noxSeen = false; string noxState = "";
     double wheelAcc = 0; int tickN = 0;
-    string[] pageNames = { "PgMusic", "PgTimer", "PgNox", "PgToday", "PgAgenda", "PgHouse", "PgTools" };
-    string[] tabNames = { "TabMusic", "TabTimer", "TabNox", "TabToday", "TabAgenda", "TabHouse", "TabTools" };
+    string[] pageNames = { "PgMusic", "PgTimer", "PgNox", "PgToday", "PgAgenda", "PgHouse", "PgTools", "PgNotifs" };
+    string[] tabNames = { "TabMusic", "TabTimer", "TabNox", "TabToday", "TabAgenda", "TabHouse", "TabTools", "TabNotifs" };
     System.Globalization.CultureInfo fr = System.Globalization.CultureInfo.GetCultureInfo("fr-FR");
 
     public App(Window w, Hashtable s, Hashtable c) {
@@ -972,6 +972,7 @@ namespace Island {
       Click("BT25", delegate { StartTimer(25, "Focus"); });
       Click("BT5", delegate { StartTimer(5, "Pause"); });
       Click("BTStop", delegate { timerEnd = null; UpdateTimer(); Refresh(); });
+      Click("NotifClear", delegate { notifHist.Clear(); notifRev++; notifShownRev = -1; Safe("notifications", RenderNotifs); Refresh(); });
       for (int i = 0; i < tabNames.Length; i++) {
         string target = pageNames[i];
         Click(tabNames[i], delegate { GoPage(target); });
@@ -1314,7 +1315,7 @@ namespace Island {
     List<string> PageList() {
       List<string> l = new List<string>();
       // ordre fixe, Nox au milieu (demande de Mathis) : un geste à gauche ou à droite suffit
-      l.Add("PgAgenda"); l.Add("PgMusic"); l.Add("PgNox"); l.Add("PgHouse"); l.Add("PgTools");
+      l.Add("PgAgenda"); l.Add("PgMusic"); l.Add("PgNox"); l.Add("PgHouse"); l.Add("PgTools"); l.Add("PgNotifs");
       return l;
     }
     void GoPage(string p) {
@@ -1353,6 +1354,7 @@ namespace Island {
       if (name != page && expandedOn) holdUntil = DateTime.Now.AddMilliseconds(1600);
       page = name;
       if (name == "PgNox" && expandedOn) noxUnread = false;
+      if (name == "PgNotifs") { notifShownRev = -1; Safe("notifications", RenderNotifs); }
       sync["houseWanted"] = name == "PgHouse" && expandedOn;
       List<string> l = PageList();
       string order = string.Join(",", l.ToArray());
@@ -1437,6 +1439,7 @@ namespace Island {
       Safe("musique", UpdateMedia);
       Safe("like", LikeTick);
       Safe("notifications", NotifTick);
+      if (expandedOn && page == "PgNotifs" && (notifShownRev != notifRev || tickN % 300 == 0)) { notifShownRev = -1; Safe("notifications", RenderNotifs); }
       if (tickN % 5 == 1) Safe("minuteur", UpdateTimer);
       if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
       if (tickN % 10 == 3) Safe("appareils", WatchDevices);
@@ -1489,7 +1492,7 @@ namespace Island {
         if (!l.Contains(page)) ShowPage(l[0], 0);
         else if (string.Join(",", l.ToArray()) != tabOrder) ShowPage(page, 0);
         // la vue ne rétrécit pas tant que la souris est dessus (sinon elle se refermerait sous le curseur)
-        string ek = page + "|" + agendaRev + "|" + houseRev + "|" + VisKey("NConfirm") + VisKey("NSms") + VisKey("BSmsReply") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
+        string ek = page + "|" + agendaRev + "|" + houseRev + "|" + notifRev + "|" + VisKey("NConfirm") + VisKey("NSms") + VisKey("BSmsReply") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
         if (ek != expKey) { expKey = ek; expanded.Height = double.NaN; expNatural = Math.Ceiling(Natural(expanded, 440).Height); }
         stickyH = expNatural;   // chaque widget a sa hauteur (plus de vide) ; un délai de grâce évite la fermeture sous le curseur
         expanded.Height = stickyH;
@@ -2386,7 +2389,7 @@ namespace Island {
       System.Collections.Concurrent.ConcurrentQueue<object> q = G(sync, "winnotifs") as System.Collections.Concurrent.ConcurrentQueue<object>;
       if (q == null) return;
       object o;
-      while (q.TryDequeue(out o)) { Hashtable h = U(o) as Hashtable; if (h != null) notifWait.Add(new object[] { h, DateTime.Now }); }
+      while (q.TryDequeue(out o)) { Hashtable h = U(o) as Hashtable; if (h != null) { notifWait.Add(new object[] { h, DateTime.Now }); NotifRemember(h); } }
       DateTime now = DateTime.Now;
       notifWait.RemoveAll(delegate(object[] x) { return (now - (DateTime)x[1]).TotalSeconds > 60; });   // trop vieille : on laisse tomber
       if (notifWait.Count == 0 || expandedOn || typing || talking || hiddenFs || now < peekUntil) return;
@@ -2408,6 +2411,63 @@ namespace Island {
       ShowPeek(G(n, "logo") as ImageSource, "", "#FFFFFF", "#2C2C2E", sms ? app + " · survole pour répondre" : app, title, body, sms ? 7000 : 4500, false);
       peekIsSms = sms;
       Refresh();
+    }
+
+    // ---------------- v4.52 : historique des dernières notifications (onglet « Notifs ») ----------------
+    // en mémoire seulement (jamais écrit sur le disque) : vidé au redémarrage de la pilule
+    const int NotifMax = 10;
+    List<object[]> notifHist = new List<object[]>();   // { appli, titre, texte, logo, heure }
+    int notifRev, notifShownRev = -1;
+    void NotifRemember(Hashtable n) {
+      string app = Str(G(n, "app")), title = Str(G(n, "title")), body = Str(G(n, "body"));
+      if (title.Length == 0 && body.Length == 0) return;
+      notifHist.Insert(0, new object[] { app, title, body, G(n, "logo") as ImageSource, DateTime.Now });
+      if (notifHist.Count > NotifMax) notifHist.RemoveRange(NotifMax, notifHist.Count - NotifMax);
+      notifRev++;
+    }
+    void RenderNotifs() {
+      if (notifShownRev == notifRev && notifRev > 0) return;
+      notifShownRev = notifRev;
+      Panel list = E<Panel>("NotifList");
+      list.Children.Clear();
+      if (notifHist.Count == 0) {
+        TextBlock vide = new TextBlock(); vide.Text = "Aucune notification depuis le démarrage de la pilule.";
+        vide.FontSize = 12.5; vide.Foreground = Br("#8E8E93"); vide.Margin = new Thickness(2, 6, 0, 6);
+        list.Children.Add(vide);
+      }
+      int i = 0;
+      foreach (object[] x in notifHist) {
+        if (i++ >= 5) break;   // 5 visibles : la vue reste compacte
+        string app = (string)x[0], title = (string)x[1], body = (string)x[2]; ImageSource logo = x[3] as ImageSource; DateTime at = (DateTime)x[4];
+        Grid row = new Grid(); row.Margin = new Thickness(0, 0, 0, 8);
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        Border ic = new Border(); ic.Width = 28; ic.Height = 28; ic.CornerRadius = new CornerRadius(8); ic.Background = Br("#1FFFFFFF");
+        ic.VerticalAlignment = VerticalAlignment.Top; ic.Margin = new Thickness(0, 1, 10, 0);
+        if (logo != null) { Image im = new Image(); im.Source = logo; im.Width = 18; im.Height = 18; ic.Child = im; }
+        else { TextBlock g = new TextBlock(); g.Text = "\uEA8F"; g.FontFamily = new FontFamily("Segoe Fluent Icons"); g.FontSize = 13; g.Foreground = Br("#C7C7CC");
+               g.HorizontalAlignment = HorizontalAlignment.Center; g.VerticalAlignment = VerticalAlignment.Center; ic.Child = g; }
+        row.Children.Add(ic);
+        StackPanel sp = new StackPanel(); Grid.SetColumn(sp, 1);
+        TextBlock head = new TextBlock(); head.FontSize = 11; head.Foreground = Br("#8E8E93"); head.TextTrimming = TextTrimming.CharacterEllipsis;
+        head.Text = (app.Length > 0 ? app + " · " : "") + Ago(at);
+        TextBlock t = new TextBlock(); t.FontSize = 12.5; t.FontWeight = FontWeights.SemiBold; t.TextTrimming = TextTrimming.CharacterEllipsis;
+        t.Text = title.Length > 0 ? title : app;
+        sp.Children.Add(head); sp.Children.Add(t);
+        if (body.Length > 0) {
+          TextBlock b = new TextBlock(); b.FontSize = 12; b.Foreground = Br("#C7C7CC"); b.TextTrimming = TextTrimming.CharacterEllipsis;
+          b.Text = body.Replace("\r", " ").Replace("\n", " "); sp.Children.Add(b);
+        }
+        row.Children.Add(sp);
+        list.Children.Add(row);
+      }
+      Vis("NotifClear", notifHist.Count > 0);
+    }
+    static string Ago(DateTime at) {
+      TimeSpan d = DateTime.Now - at;
+      if (d.TotalMinutes < 1) return "à l'instant";
+      if (d.TotalMinutes < 60) return "il y a " + (int)d.TotalMinutes + " min";
+      return at.Date == DateTime.Today ? at.ToString("HH:mm") : at.ToString("dd/MM HH:mm");
     }
 
     // ---------------- répondre à un SMS (notification « Mobile connecté ») ----------------
@@ -4444,6 +4504,12 @@ if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIg
                 <TextBlock Text="Agenda" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
               </StackPanel>
             </Button>
+            <Button x:Name="TabNotifs" Style="{StaticResource Tab}">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xEA8F;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <TextBlock Text="Notifs" FontSize="11" Margin="5,0,0,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </StackPanel>
+            </Button>
             <Button x:Name="TabToday" Style="{StaticResource Tab}">
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="&#xE787;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -4616,6 +4682,12 @@ if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIg
               <TextBlock x:Name="AMonth" FontSize="12" Foreground="#8E8E93" Margin="2,0,0,6"/>
               <UniformGrid x:Name="ADays" Columns="7" Margin="0,0,0,10"/>
               <StackPanel x:Name="AList"/>
+            </StackPanel>
+
+            <!-- Dernières notifications (v4.52) -->
+            <StackPanel x:Name="PgNotifs" Visibility="Collapsed">
+              <StackPanel x:Name="NotifList"/>
+              <Button x:Name="NotifClear" Style="{StaticResource Chip}" HorizontalAlignment="Left" Visibility="Collapsed"><TextBlock Text="Tout effacer" FontSize="12"/></Button>
             </StackPanel>
 
             <!-- Aujourd'hui -->
