@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.53'
+$Version = '4.54'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -13,6 +13,7 @@ $ChargeColor      = "#30D158"
 $HideInFullscreen = $true
 $WindowsNotifs    = $true      # notifications Windows (WhatsApp, Lien avec Windows…) affichées dans la pilule
 $NotifIgnore      = @('Spotify')   # applis dont on n'affiche pas les notifications (nom tel qu'affiché par Windows)
+$SuivreEcran      = $true      # plusieurs écrans : la pilule passe en haut de l'écran de la fenêtre active
 $ChromeAdresse    = $true      # Chrome / Edge au premier plan : la pilule descend sur la barre d'adresse (sous les onglets)
 $ChromeDecalage   = 46         # haut de la pilule sous le bord de Chrome agrandi (4.47 : 37 → 46, centrée sur la barre d'adresse) (à ajuster dans config.ps1 si besoin)
 # ------------------------------
@@ -241,6 +242,30 @@ namespace Island {
       if (r.L > x || r.R < x || r.T > y || r.B < y + 200) return false;
       top = r.T; return true;
     }
+    // v4.54 : plusieurs écrans
+    [StructLayout(LayoutKind.Sequential)] struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+    [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO mi);
+    static bool Monitor(IntPtr h, out IntPtr m, out RECT mon, out RECT work) {
+      mon = new RECT(); work = new RECT();
+      m = MonitorFromWindow(h, 2);   // MONITOR_DEFAULTTONEAREST
+      if (m == IntPtr.Zero) return false;
+      MONITORINFO mi = new MONITORINFO(); mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+      if (!GetMonitorInfo(m, ref mi)) return false;
+      mon = mi.rcMonitor; work = mi.rcWork; return true;
+    }
+    // écran de la fenêtre au premier plan (zone de travail en pixels physiques) ; faux pour le bureau, la barre des
+    // tâches, le menu Démarrer, une fenêtre réduite ou une fenêtre de la pilule elle-même
+    public static bool ForegroundMonitor(IntPtr self, IntPtr side, out IntPtr m, out RECT work) {
+      m = IntPtr.Zero; work = new RECT();
+      IntPtr h = GetForegroundWindow();
+      if (h == IntPtr.Zero || h == self || h == side || IsIconic(h)) return false;
+      System.Text.StringBuilder sb = new System.Text.StringBuilder(64); GetClassName(h, sb, 64);
+      string c = sb.ToString();
+      if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd" || c == "Windows.UI.Core.CoreWindow"
+          || c == "NotifyIconOverflowWindow" || c == "TopLevelWindowForOverflowXamlIsland" || c == "XamlExplorerHostIslandWindow") return false;
+      RECT mon; return Monitor(h, out m, out mon, out work);
+    }
     public static bool ForegroundIsFullscreen(int sw, int sh, IntPtr self) {
       IntPtr h = GetForegroundWindow();
       if (h == IntPtr.Zero || h == self) return false;
@@ -248,6 +273,9 @@ namespace Island {
       string c = sb.ToString();
       if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd") return false;
       RECT r; if (!GetWindowRect(h, out r)) return false;
+      IntPtr m; RECT mon, work;   // v4.54 : comparé à l'écran de la fenêtre (2e écran compris)
+      if (Monitor(h, out m, out mon, out work))
+        return Math.Abs(r.L - mon.L) <= 1 && Math.Abs(r.T - mon.T) <= 1 && Math.Abs(r.R - mon.R) <= 1 && Math.Abs(r.B - mon.B) <= 1;
       return Math.Abs(r.L) <= 1 && Math.Abs(r.T) <= 1 && Math.Abs(r.R - sw) <= 1 && Math.Abs(r.B - sh) <= 1;
     }
     // pourcentage (-1 si pas de batterie) et secteur
@@ -1030,6 +1058,14 @@ namespace Island {
         Log("fenêtre créée");
       };
       win.ContentRendered += delegate { Log("fenêtre affichée à l'écran"); Safe("panneau", BuildSide); };
+      // v4.54 : écran branché / débranché → on repart de l'écran principal, CheckMonitor replace la pilule
+      Microsoft.Win32.SystemEvents.DisplaySettingsChanged += delegate {
+        win.Dispatcher.BeginInvoke(new Action(delegate { Safe("écrans", delegate {
+          curMon = IntPtr.Zero; curWa = Rect.Empty;
+          if (!floating) topTarget = WorkArea().Top;
+          win.BeginAnimation(Window.TopProperty, null); Place();
+        }); }));
+      };
       // sortie de veille : l'affichage transparent peut se perdre (carte graphique réinitialisée) -> redémarrage propre
       Microsoft.Win32.SystemEvents.PowerModeChanged += delegate(object o, Microsoft.Win32.PowerModeChangedEventArgs ev) {
         if (ev.Mode != Microsoft.Win32.PowerModes.Resume) return;
@@ -1100,8 +1136,30 @@ namespace Island {
       target.BeginAnimation(p, a);
     }
 
+    // v4.54 (demande de Mathis) : avec un 2e écran, la pilule suit la fenêtre active (haut de son écran)
+    Rect curWa = Rect.Empty; IntPtr curMon = IntPtr.Zero;
+    Rect WorkArea() { return curWa.IsEmpty ? SystemParameters.WorkArea : curWa; }
+    void CheckMonitor() {
+      if (hwnd == IntPtr.Zero || !Bool(G(cfg, "followScreen"))) return;
+      if (expandedOn || typing || talking || mouseIn) return;   // jamais pendant qu'on s'en sert
+      IntPtr m; Win.RECT w;
+      if (!Win.ForegroundMonitor(hwnd, sideHwnd, out m, out w) || m == curMon) return;
+      double sx = 1, sy = 1;
+      PresentationSource ps = PresentationSource.FromVisual(win);
+      if (ps != null && ps.CompositionTarget != null) { Matrix mx = ps.CompositionTarget.TransformToDevice; sx = mx.M11; sy = mx.M22; }
+      Rect wa = new Rect(w.L / sx, w.T / sy, Math.Max(1, (w.R - w.L) / sx), Math.Max(1, (w.B - w.T) / sy));
+      bool first = curMon == IntPtr.Zero;
+      curMon = m;
+      Rect prim = SystemParameters.WorkArea;
+      curWa = (Math.Abs(wa.Left - prim.Left) < 2 && Math.Abs(wa.Top - prim.Top) < 2 && Math.Abs(wa.Width - prim.Width) < 2) ? Rect.Empty : wa;
+      if (!floating) topTarget = WorkArea().Top;
+      win.BeginAnimation(Window.TopProperty, null);
+      Place();
+      if (!first && !hiddenFs) { root.BeginAnimation(UIElement.OpacityProperty, null); root.Opacity = 0; Anim(root, UIElement.OpacityProperty, 1, 260, 0, null); }
+      Log("écran : " + (curWa.IsEmpty ? "principal" : string.Format("{0:0},{1:0} {2:0}x{3:0}", wa.Left, wa.Top, wa.Width, wa.Height)));
+    }
     void Place() {
-      Rect wa = SystemParameters.WorkArea;
+      Rect wa = WorkArea();
       win.Left = wa.Left + (wa.Width - win.Width) / 2;
       win.Top = topTarget;
     }
@@ -1110,12 +1168,12 @@ namespace Island {
     // juste sous les onglets, coins du haut arrondis ; elle remonte dès qu'on quitte Chrome.
     void CheckBrowser() {
       if (hwnd == IntPtr.Zero) return;
-      bool want = false; double top = 0;
+      bool want = false; double top = WorkArea().Top;
       if (Bool(G(cfg, "chromeShift")) && !hiddenFs) {
         double sx = 1, sy = 1;
         PresentationSource ps = PresentationSource.FromVisual(win);
         if (ps != null && ps.CompositionTarget != null) { Matrix mx = ps.CompositionTarget.TransformToDevice; sx = mx.M11; sy = mx.M22; }
-        Rect wa = SystemParameters.WorkArea;
+        Rect wa = WorkArea();
         int px = (int)Math.Round((win.Left + win.Width / 2) * sx), py = (int)Math.Round((wa.Top + 17) * sy);
         int t; bool zoomed;
         if (Win.BrowserUnder(hwnd, px, py, out t, out zoomed)) {
@@ -1125,7 +1183,7 @@ namespace Island {
         }
       }
       if (want == floating && Math.Abs(top - topTarget) < 0.5) return;
-      floating = want; topTarget = want ? top : 0;
+      floating = want; topTarget = top;
       DoubleAnimation a = new DoubleAnimation(topTarget, TimeSpan.FromMilliseconds(260));
       a.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
       win.BeginAnimation(Window.TopProperty, a);
@@ -1443,7 +1501,7 @@ namespace Island {
       if (tickN % 5 == 1) Safe("minuteur", UpdateTimer);
       if (dragging && (now - lastDrag).TotalMilliseconds > 450) { dragging = false; peekUntil = DateTime.MinValue; }
       if (tickN % 10 == 3) Safe("appareils", WatchDevices);
-      if (tickN % 3 == 2) Safe("chrome", CheckBrowser);
+      if (tickN % 3 == 2) { Safe("écran", CheckMonitor); Safe("chrome", CheckBrowser); }
       if (tickN % 20 == 7) Safe("état du PC", PollSys);
       Safe("panneau", SideTick);
       Safe("anneaux", AnimateSys);
@@ -1452,7 +1510,7 @@ namespace Island {
         Safe("nox", UpdateNox);
         Safe("réponse SMS", UpdateSmsReply);
         Safe("plein écran", CheckFullscreen);
-        Rect wa = SystemParameters.WorkArea;
+        Rect wa = WorkArea();
         if (Math.Abs(win.Left - (wa.Left + (wa.Width - win.Width) / 2)) > 1) Place();
       }
       if (G(sync, "updated") != null && !restartPending) {
@@ -4723,7 +4781,7 @@ if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIg
 
 try {
   $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
-  $cfg = @{ logPath = [string]$LogPath; accent = $DefaultAccent; timerColor = $TimerColor; chargeColor = $ChargeColor; hideFullscreen = [bool]$HideInFullscreen; chromeShift = [bool]$ChromeAdresse; chromeOffset = [double]$ChromeDecalage; version = $Version }
+  $cfg = @{ logPath = [string]$LogPath; accent = $DefaultAccent; timerColor = $TimerColor; chargeColor = $ChargeColor; hideFullscreen = [bool]$HideInFullscreen; chromeShift = [bool]$ChromeAdresse; followScreen = [bool]$SuivreEcran; chromeOffset = [double]$ChromeDecalage; version = $Version }
   $app = New-Object Island.App($win, $sync, $cfg)
 } catch {
   $sync.stop = $true
