@@ -22,8 +22,7 @@ $cfg = Join-Path $d 'config.ps1'
 if (-not (Test-Path $cfg)) {
   $c = @(
     '# Réglages perso de la Dynamic Island (ce fichier n''est jamais remplacé par les mises à jour)',
-    '# $NoxStatusUrl = "https://..."',
-    '# $NoxToken     = "..."',
+    '# $NoxUrl = ""   # vide : Nox est trouvé tout seul par Tailscale',
     '# $HideInFullscreen = $true'
   ) -join "`r`n"
   [System.IO.File]::WriteAllText($cfg, $c, (New-Object System.Text.UTF8Encoding $true))
