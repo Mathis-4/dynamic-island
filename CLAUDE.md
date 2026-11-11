@@ -1,0 +1,22 @@
+# Dynamic Island (« la pilule ») : règles pour Claude
+
+- Propriétaire : Mathis, pas à l'aise avec le code. Il ne modifie pas les fichiers. Expliquer chaque changement simplement, en français, tutoiement. Préférence notée le 05/11/2026 : les évolutions de la pilule sont publiées directement, et elle se met à jour toute seule.
+- **Ce dépôt est PUBLIC.** N'y écrire aucune adresse, aucun nom de machine, aucun identifiant, aucun secret, ni dans le code, ni dans les commentaires, ni dans les messages de commit.
+- Ce que fait la pilule : une barre façon iPhone en haut de l'écran du PC Windows de Mathis (heure, batterie, musique en cours, minuteur Pomodoro, agenda, lumières, raccourcis, notifications Windows, statut de Nox) et un panneau latéral sur le bord droit (dépôt de fichier, presse-papiers, « Que faire ici ? »). Elle fait partie de l'écosystème Domus.
+- Fichiers : `island.ps1` (PowerShell de démarrage, puis du C# dans une chaîne compilée à chaque lancement, puis trois fils de fond PowerShell, puis l'interface en XAML), `install.ps1`, `version.txt`, `README.md`. Sur le PC, tout vit dans `%LOCALAPPDATA%\DynamicIsland` ; `config.ps1` (réglages perso) n'est jamais remplacé.
+- **Nox** : la pilule s'identifie uniquement par Tailscale (c'est `tailscale serve` qui reconnaît l'appareil), avec l'en-tête `X-Jarvis: 1` (marqueur anti-CSRF exigé par Nox, pas un secret). AUCUN jeton, aucun mot de passe. L'adresse de Nox est trouvée à l'exécution par la commande `tailscale` locale, jamais écrite ici. Routes appelées, et elles seules :
+  - lecture (GET) : `/api/equipe`, `/api/widget`, `/api/etat`, `/api/carnet/semaine`, `/api/pouls`, `/api/conversation` ;
+  - envoi (POST) : `/api/conversation` (message, fichier ou capture), `/api/conversation/confirmer`, `/api/conversation/bouton`, `/api/sms/repondre`, `/api/lumiere`, `/api/musique`, `/api/voix/jeton`, `/api/voix/outil`, `/api/voix/fin`.
+  - Un envoi n'est annoncé « Envoyé » que si Nox l'a reçu : le fil Nox lit la réponse et la pilule affiche « Non envoyé » sinon.
+  - Avant d'ajouter une route ou de changer la forme d'une requête : vérifier côté Nox (dépôt Jarvis), les deux dépôts vivent séparément.
+- Autres appels réseau, et eux seuls : GitHub (ce dépôt, pour les mises à jour) et Gemini Live pour la voix (avec un jeton temporaire fourni par Nox). Les notifications Windows, le presse-papiers et les captures ne partent nulle part sauf vers Nox, à la demande de Mathis. Le journal ne garde jamais le contenu d'un message, d'une notification ou d'une capture.
+- **Mise à jour automatique** : 15 s après le démarrage puis toutes les 3 h, la pilule lit le dernier commit de `main`, compare `version.txt` à sa version, télécharge `island.ps1`, vérifie que la syntaxe PowerShell est valide et que le fichier contient bien `$Version = '<version>'`, garde l'ancien en `island.ps1.bak`, se remplace et redémarre. Tout ce qui est fusionné sur `main` tourne donc sur le PC de Mathis sans autre contrôle.
+- **Retour arrière** : si le C# ne compile pas ou si l'interface ne se construit pas au démarrage, la version fautive est notée dans `skip.txt`, `island.ps1.bak` est restauré et la pilule redémarre. Une panne qui survient après le démarrage n'est PAS rattrapée.
+- **Aucune exécution possible dans la session de Claude** (pas de PowerShell, pas de Windows) : rien ne peut être testé avant la fusion. Donc :
+  - changements minimaux et chirurgicaux, relus plusieurs fois ; pas de remaniement ;
+  - C# compatible avec le compilateur de Windows PowerShell 5.1 (C# 5 : pas de `$"…"`, pas de `?.`, pas de `out var`) ;
+  - encodage conservé à l'octet près : `island.ps1` en UTF-8 avec BOM, fins de ligne LF ; vérifier avec `git diff --stat` que seules les lignes voulues changent ;
+  - version incrémentée aux DEUX endroits, identiques : `version.txt` et `$Version` en tête de `island.ps1` (sinon la mise à jour est ignorée) ; message de commit « vX.YY : ce qui change » ;
+  - dire clairement à Mathis que le premier lancement sur son PC est le vrai test, et quoi regarder.
+- Pas de contrôle automatique (CI) dans ce dépôt.
+- Charte : pendant la musique, la pilule prend les couleurs de la pochette ; hors musique, une teinte légère de l'ambiance du moment. Pas d'émoji dans l'interface, pas de mouvement décoratif (seul bouge ce qui sert). Textes en français, tutoiement. Référence : la skill `nox-design` du dépôt Jarvis.

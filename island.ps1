@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.57'
+$Version = '4.58'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -930,6 +930,7 @@ namespace Island {
     DateTime? timerEnd = null; double timerTotal = 1; string timerLabel = "";
     double vol = -2; bool muted = false; int battPct = 100; bool? power = null; bool lowWarned = false;
     string noxMsgId = null; bool noxSeen = false; string noxState = "";
+    int noxEchecs = 0; DateTime noxEchecUntil = DateTime.MinValue;   // 4.58 : ordres que Nox n'a pas reçus
     double wheelAcc = 0; int tickN = 0;
     string[] pageNames = { "PgMusic", "PgTimer", "PgNox", "PgToday", "PgAgenda", "PgHouse", "PgTools", "PgNotifs" };
     string[] tabNames = { "TabMusic", "TabTimer", "TabNox", "TabToday", "TabAgenda", "TabHouse", "TabTools", "TabNotifs" };
@@ -1391,6 +1392,7 @@ namespace Island {
       List<string> l = new List<string>();
       // ordre fixe, Nox au milieu (demande de Mathis) : un geste à gauche ou à droite suffit
       l.Add("PgAgenda"); l.Add("PgMusic"); l.Add("PgNox"); l.Add("PgHouse"); l.Add("PgTools"); l.Add("PgNotifs");
+      l.Add("PgTimer");   // 4.58 : minuteur Pomodoro de retour (demande de Mathis du 11/11/2026), en dernier pour ne déplacer aucun onglet
       return l;
     }
     void GoPage(string p) {
@@ -2145,6 +2147,16 @@ namespace Island {
         mb.BorderThickness = new Thickness(state == "down" ? (mk == "NMask" ? 2.5 : 1.2) : 0);
       }
       E<UIElement>("CEyes").Opacity = state == "off" ? 0.55 : 1;
+      // 4.58 : un ordre (message, feu vert, bouton…) que Nox n'a pas reçu ou a refusé : on le dit, au lieu de laisser « Envoyé »
+      int echecs = (int)Num(G(sync, "noxEchec"));
+      if (echecs != noxEchecs) {
+        noxEchecs = echecs;
+        string pourquoi = Str(G(sync, "noxEchecTexte"));
+        noxEchecUntil = DateTime.Now.AddSeconds(8);
+        E<TextBlock>("NLast").Text = "Non envoyé : " + pourquoi;
+        Vis("NLastBox", true);
+        ShowPeek(null, "\uE783", "#FFFFFF", "#EF6A5A", "Nox", "Non envoyé", pourquoi, 5000, false);
+      }
       if (n == null || !Bool(G(n, "ok"))) { Vis("NConfirm", false); return; }
       Safe("agenda", delegate { UpdateAgenda(G(n, "week") as IEnumerable); });
       Safe("maison", delegate { UpdateHouse(G(n, "house") as Hashtable); });
@@ -2166,7 +2178,7 @@ namespace Island {
       Hashtable msg = G(n, "last") as Hashtable;
       if (msg != null) {
         string id = Str(G(msg, "id")), txt = Str(G(msg, "texte"));
-        E<TextBlock>("NLast").Text = txt;
+        if (DateTime.Now >= noxEchecUntil) E<TextBlock>("NLast").Text = txt;   // « Non envoyé » reste lisible 8 s
         E<TextBlock>("NLastTime").Text = NiceTime(Str(G(msg, "heure")));
         Vis("NLastBox", txt.Length > 0);
         SetNoxButtons(id, G(msg, "boutons") as IEnumerable);
@@ -4144,7 +4156,25 @@ $noxScript = {
           NLog ("feu vert : " + $(if ($parts[1] -eq '1') { 'confirmé' } else { 'annulé' }))
         }
       }
-      $pending = @($pending | Where-Object { -not $_.IsCompleted })
+      # 4.58 : résultat de ces envois. Nox injoignable, en erreur ou qui refuse : la pilule affiche « Non envoyé ».
+      # Délai dépassé (Nox peut réfléchir plus de 40 s avant de répondre) : on ne sait pas, donc on ne dit rien.
+      $reste = @()
+      foreach ($ordre in $pending) {
+        if (-not $ordre.IsCompleted) { $reste += $ordre }
+        elseif ($ordre.IsCanceled) { NLog 'envoi : pas de réponse de Nox dans le délai' }
+        else {
+          $refus = "Nox n'a pas reçu ta demande"
+          try {
+            if ($ordre.Status -eq 'RanToCompletion' -and $ordre.Result.IsSuccessStatusCode) {
+              $refus = ''
+              $rep = $ordre.Result.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+              if ($rep -and $rep.ok -eq $false) { $refus = [string]$rep.erreur; if (-not $refus) { $refus = 'Nox a refusé la demande' } }
+            }
+          } catch {}
+          if ($refus) { $sync.noxEchecTexte = $refus; $sync.noxEchec = [int]$sync.noxEchec + 1; NLog 'envoi non reçu ou refusé par Nox' }
+        }
+      }
+      $pending = $reste
 
       # qui travaille en ce moment
       if ([DateTime]::Now -ge $nextEquipe) {
@@ -4543,7 +4573,9 @@ if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIg
       <Border x:Name="Expanded" Width="440" Padding="20,12,20,10">
         <DockPanel LastChildFill="True">
           <!-- onglets : clic, ou molette / deux doigts -->
-          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+          <!-- 4.58 : 7 onglets avec le minuteur ; si la rangée dépasse la largeur, elle rétrécit au lieu d'être coupée -->
+          <Viewbox DockPanel.Dock="Bottom" StretchDirection="DownOnly" HorizontalAlignment="Center" Margin="0,10,0,0">
+          <StackPanel Orientation="Horizontal">
             <Button x:Name="TabMusic" Style="{StaticResource Tab}">
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -4593,6 +4625,7 @@ if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIg
               </StackPanel>
             </Button>
           </StackPanel>
+          </Viewbox>
           <Grid VerticalAlignment="Center">
 
             <!-- Musique -->
