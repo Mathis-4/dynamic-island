@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.58'
+$Version = '4.59'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -1392,7 +1392,6 @@ namespace Island {
       List<string> l = new List<string>();
       // ordre fixe, Nox au milieu (demande de Mathis) : un geste à gauche ou à droite suffit
       l.Add("PgAgenda"); l.Add("PgMusic"); l.Add("PgNox"); l.Add("PgHouse"); l.Add("PgTools"); l.Add("PgNotifs");
-      l.Add("PgTimer");   // 4.58 : minuteur Pomodoro de retour (demande de Mathis du 11/11/2026), en dernier pour ne déplacer aucun onglet
       return l;
     }
     void GoPage(string p) {
@@ -4573,9 +4572,7 @@ if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIg
       <Border x:Name="Expanded" Width="440" Padding="20,12,20,10">
         <DockPanel LastChildFill="True">
           <!-- onglets : clic, ou molette / deux doigts -->
-          <!-- 4.58 : 7 onglets avec le minuteur ; si la rangée dépasse la largeur, elle rétrécit au lieu d'être coupée -->
-          <Viewbox DockPanel.Dock="Bottom" StretchDirection="DownOnly" HorizontalAlignment="Center" Margin="0,10,0,0">
-          <StackPanel Orientation="Horizontal">
+          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
             <Button x:Name="TabMusic" Style="{StaticResource Tab}">
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="&#xEC4F;" FontFamily="Segoe Fluent Icons" FontSize="11" VerticalAlignment="Center" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -4625,7 +4622,6 @@ if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIg
               </StackPanel>
             </Button>
           </StackPanel>
-          </Viewbox>
           <Grid VerticalAlignment="Center">
 
             <!-- Musique -->
