@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.60'
+$Version = '4.61'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -2499,6 +2499,29 @@ namespace Island {
       TextBlock x = new TextBlock(); x.Text = t; x.FontSize = size; x.Foreground = Br(color); x.TextTrimming = TextTrimming.CharacterEllipsis;
       return x;
     }
+    // petite pochette envoyée par Nox (« data:image/...;base64,... ») ; null si absente ou illisible
+    ImageSource Cover(string data) {
+      int i = data.IndexOf("base64,");
+      if (!data.StartsWith("data:image") || i < 0) return null;
+      try {
+        BitmapImage bi = new BitmapImage();
+        bi.BeginInit(); bi.CacheOption = BitmapCacheOption.OnLoad; bi.StreamSource = new System.IO.MemoryStream(Convert.FromBase64String(data.Substring(i + 7))); bi.EndInit(); bi.Freeze();
+        return bi;
+      } catch { return null; }
+    }
+    // une ligne : pochette carrée à gauche, texte à droite
+    Grid CoverRow(string pochette, double size, FrameworkElement content) {
+      Grid g = new Grid();
+      g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+      g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+      Border c = new Border(); c.Width = size; c.Height = size; c.CornerRadius = new CornerRadius(6); c.Background = Br("#1C1C1E");
+      ImageSource img = Cover(pochette);
+      if (img != null) { ImageBrush ib = new ImageBrush(img); ib.Stretch = Stretch.UniformToFill; c.Background = ib; }
+      content.Margin = new Thickness(10, 0, 0, 0); content.VerticalAlignment = VerticalAlignment.Center;
+      Grid.SetColumn(content, 1);
+      g.Children.Add(c); g.Children.Add(content);
+      return g;
+    }
     void ShowQueue(string txt) {
       Dictionary<string, object> r = null, m = null;
       try { r = json.DeserializeObject(txt) as Dictionary<string, object>; } catch { }
@@ -2509,10 +2532,12 @@ namespace Island {
       System.Collections.IEnumerable av = m.ContainsKey("a_venir") ? m["a_venir"] as System.Collections.IEnumerable : null;
       if (av != null) foreach (object o in av) {
         Dictionary<string, object> t = o as Dictionary<string, object>;
-        if (t == null || q.Children.Count == 6) continue;
-        StackPanel row = new StackPanel(); row.Margin = new Thickness(0, 0, 0, 7);
-        row.Children.Add(QText(Str(t.ContainsKey("titre") ? t["titre"] : null), 12.5, "#FFFFFF"));
-        row.Children.Add(QText(Str(t.ContainsKey("artiste") ? t["artiste"] : null), 11, "#8E8E93"));
+        if (t == null || q.Children.Count == 5) continue;
+        StackPanel txtp = new StackPanel();
+        txtp.Children.Add(QText(Str(t.ContainsKey("titre") ? t["titre"] : null), 12.5, "#FFFFFF"));
+        txtp.Children.Add(QText(Str(t.ContainsKey("artiste") ? t["artiste"] : null), 11, "#8E8E93"));
+        Grid row = CoverRow(Str(t.ContainsKey("pochette") ? t["pochette"] : null), 36, txtp);
+        row.Margin = new Thickness(0, 0, 0, 6);
         q.Children.Add(row);
       }
       Vis("MQueueEmpty", q.Children.Count == 0);
@@ -2522,9 +2547,9 @@ namespace Island {
         if (pd == null || lists.Children.Count == 5) continue;
         string nom = Str(pd.ContainsKey("nom") ? pd["nom"] : null), uri = Str(pd.ContainsKey("uri") ? pd["uri"] : null);
         if (uri.Length == 0) continue;
-        Border chip = new Border(); chip.CornerRadius = new CornerRadius(10); chip.Padding = new Thickness(10, 6, 10, 6); chip.Margin = new Thickness(0, 0, 0, 5);
+        Border chip = new Border(); chip.CornerRadius = new CornerRadius(10); chip.Padding = new Thickness(5, 5, 10, 5); chip.Margin = new Thickness(0, 0, 0, 4);
         chip.Background = Br("#16FFFFFF"); chip.Cursor = Cursors.Hand;
-        chip.Child = QText(nom, 12.5, "#FFFFFF");
+        chip.Child = CoverRow(Str(pd.ContainsKey("pochette") ? pd["pochette"] : null), 32, QText(nom, 12.5, "#FFFFFF"));
         chip.MouseLeftButtonUp += delegate(object o2, MouseButtonEventArgs ev) {
           ev.Handled = true;
           Dictionary<string, object> body = new Dictionary<string, object>();
