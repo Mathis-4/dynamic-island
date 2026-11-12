@@ -3,7 +3,7 @@
 #  L'affichage est du code compilé (C#) ; PowerShell lance, lit la musique et parle à Nox.
 #  Clic droit sur la pilule : version, journal, redémarrer, quitter
 # ============================================================
-$Version = '4.59'
+$Version = '4.60'
 
 # ---------- Réglages ----------
 $NoxUrl           = ""         # vide = trouvé tout seul par Tailscale (https://jarvis.<tailnet>.ts.net)
@@ -904,7 +904,7 @@ namespace Island {
     string layer = "Compact";
     Spring W, H, R, B;
     bool running; TimeSpan last;
-    const double WinW = 520, Cx = 260;
+    double WinW = 520, WinH = 320, Cx = 260;   // 4.60 : la fenêtre grandit avec « Agrandir la vue »
     IntPtr hwnd;
     string logPath; string lastLog = "";
     Color accentDefault, timerColor, chargeColor, accent;
@@ -1059,6 +1059,9 @@ namespace Island {
       menu.Items.Add(new MenuItem { Header = "Dynamic Island v" + G(cfg, "version"), IsEnabled = false });
       menu.Items.Add(new MenuItem { Header = "Mises à jour automatiques (GitHub)", IsEnabled = false });
       menu.Items.Add(new Separator());
+      MenuItem miBig = new MenuItem { Header = "Agrandir la vue" };
+      miBig.Click += delegate { ToggleBig(miBig); };
+      menu.Items.Add(miBig);
       MenuItem miLog = new MenuItem { Header = "Ouvrir le journal" };
       miLog.Click += delegate { try { System.Diagnostics.Process.Start("notepad.exe", "\"" + logPath + "\""); } catch { } };
       MenuItem miRestart = new MenuItem { Header = "Redémarrer" };
@@ -1569,11 +1572,15 @@ namespace Island {
         if (!l.Contains(page)) ShowPage(l[0], 0);
         else if (string.Join(",", l.ToArray()) != tabOrder) ShowPage(page, 0);
         // la vue ne rétrécit pas tant que la souris est dessus (sinon elle se refermerait sous le curseur)
-        string ek = page + "|" + agendaRev + "|" + houseRev + "|" + notifRev + "|" + VisKey("NConfirm") + VisKey("NSms") + VisKey("BSmsReply") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2");
-        if (ek != expKey) { expKey = ek; expanded.Height = double.NaN; expNatural = Math.Ceiling(Natural(expanded, 440).Height); }
+        string ek = page + "|" + agendaRev + "|" + houseRev + "|" + notifRev + "|" + VisKey("NConfirm") + VisKey("NSms") + VisKey("BSmsReply") + VisKey("NLastBox") + VisKey("EProg") + VisKey("NAct") + VisKey("TMeteo") + VisKey("TAgenda1") + VisKey("TAgenda2") + "|" + big + queueRev;
+        if (big && page == "PgMusic" && !queueBusy) {
+          double age = (DateTime.Now - queueAt).TotalSeconds;
+          if (age > 25 || (E<TextBlock>("ETitle").Text != queueTitle && age > 3)) LoadQueue();   // file d'attente : relue toutes les 25 s, ou dès que le titre change
+        }
+        if (ek != expKey) { expKey = ek; expanded.Height = double.NaN; expNatural = Math.Min(WinH - 24, Math.Ceiling(Natural(expanded, big ? 760 : 440).Height)); }
         stickyH = expNatural;   // chaque widget a sa hauteur (plus de vide) ; un délai de grâce évite la fermeture sous le curseur
         expanded.Height = stickyH;
-        w = 440; h = stickyH; r = 30; resp = 0.42; damp = 0.8;
+        w = big ? 760 : 440; h = stickyH; r = 30; resp = 0.42; damp = 0.8;
       } else if (now < toastUntil) {
         name = "Toast"; w = 300; h = 34; r = 16; resp = 0.32; damp = 0.82;
       } else if (now < peekUntil) {
@@ -2363,6 +2370,7 @@ namespace Island {
         string groupe = Str(G(p, "groupe")), nom = Str(G(p, "nom"));
         bool on = Bool(G(p, "allumee"));
         int lum; if (!int.TryParse(Str(G(p, "lum")), out lum)) lum = on ? 100 : 0;
+        if (on && lum > 1) lastLum[groupe] = lum;
         object[] ov;   // changement fait à l'instant : on garde ce qu'on vient de régler le temps que Hue suive
         if (houseOverride.TryGetValue(groupe, out ov) && DateTime.Now < (DateTime)ov[2]) { on = (bool)ov[0]; lum = (int)ov[1]; }
         grid.Children.Add(RoomTile(groupe, nom, on, lum));
@@ -2373,6 +2381,7 @@ namespace Island {
 
     // tuile de pièce façon Centre de contrôle : toucher = allumer / éteindre, glisser = luminosité
     Dictionary<string, object[]> houseOverride = new Dictionary<string, object[]>();
+    Dictionary<string, int> lastLum = new Dictionary<string, int>();   // dernière luminosité vue pièce allumée
     bool roomDragging;
     FrameworkElement RoomTile(string groupe, string nom, bool on0, int lum0) {
       bool on = on0; int lum = Math.Max(1, Math.Min(100, lum0));
@@ -2407,9 +2416,17 @@ namespace Island {
       tile.MouseLeftButtonUp += delegate(object o, MouseButtonEventArgs ev) {
         if (!tile.IsMouseCaptured) return;
         tile.ReleaseMouseCapture(); ev.Handled = true;
-        if (!moved) { on = !on; paint(); SendLight(groupe, on, on ? lum : 0); }
-        else SendLight(groupe, true, lum);
-        houseOverride[groupe] = new object[] { on, lum, DateTime.Now.AddSeconds(6) };
+        if (!moved) {
+          on = !on;
+          int known; bool hasLast = lastLum.TryGetValue(groupe, out known);
+          if (on && hasLast) lum = known;   // dernière luminosité connue de cette pièce (jamais 1 % : c'est ce que Hue annonce quand la pièce est éteinte)
+          else if (on) lum = 100;           // inconnue : affichage provisoire, l'état réel arrive après la relecture
+          paint(); SendLight(groupe, on, on ? -1 : 0);
+          houseOverride[groupe] = new object[] { on, lum, DateTime.Now.AddSeconds(on && !hasLast ? 2 : 6) };
+        } else {
+          SendLight(groupe, true, lum);
+          houseOverride[groupe] = new object[] { on, lum, DateTime.Now.AddSeconds(6) };
+        }
         roomDragging = false;
       };
       return tile;
@@ -2421,7 +2438,7 @@ namespace Island {
       if (url.Length == 0) { NoxCmd("house:piece:" + groupe + ":" + (on ? "1" : "0")); return; }
       Dictionary<string, object> body = new Dictionary<string, object>();
       body["action"] = "piece"; body["groupe"] = groupe; body["allumer"] = on; body["leger"] = true;
-      if (on) body["luminosite"] = lum;
+      if (on && lum > 0) body["luminosite"] = lum;   // lum < 0 : simple allumage, Hue remet la lampe comme elle était
       string data = json.Serialize(body);
       Task.Run(new Action(delegate {
         try {
@@ -2433,6 +2450,95 @@ namespace Island {
           sync["houseRefresh"] = true;   // relire l'état réel juste après
         } catch (Exception ex) { win.Dispatcher.BeginInvoke(new Action(delegate { Log("lumière : " + ex.Message); ShowToast("\uE781", "La lumière ne répond pas", "", Rgb("#FF453A"), -1, 2200); Refresh(); })); }
       }));
+    }
+
+    // ---------------- vue agrandie (4.60) ----------------
+    bool big, queueBusy; int queueRev; DateTime queueAt = DateTime.MinValue; string queueTitle = "";
+    void ToggleBig(MenuItem mi) {
+      big = !big;
+      mi.Header = big ? "Revenir à la taille normale" : "Agrandir la vue";
+      WinW = big ? 800 : 520; WinH = big ? 520 : 320; Cx = WinW / 2;
+      win.Width = WinW; win.Height = WinH;
+      root.Width = WinW; root.Height = WinH; clipHost.Width = WinW; clipHost.Height = WinH;
+      E<FrameworkElement>("Amb").Width = WinW; E<FrameworkElement>("Amb").Height = WinH;
+      Vis("MBig", big);
+      Place();
+      expKey = ""; queueAt = DateTime.MinValue;
+      Refresh();
+      Log("vue " + (big ? "agrandie" : "normale"));
+    }
+    // appel simple à Nox ; « fini » reçoit la réponse (ou null si ça n'a pas marché)
+    void PostNox(string path, Dictionary<string, object> body, Action<string> fini) {
+      string url = Str(G(sync, "noxUrl"));
+      if (url.Length == 0) { if (fini != null) fini(null); return; }
+      string data = json.Serialize(body);
+      Task.Run(new Action(delegate {
+        string txt = null;
+        try {
+          HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url.TrimEnd('/') + path);
+          req.Method = "POST"; req.ContentType = "application/json"; req.Headers["X-Jarvis"] = "1"; req.Timeout = 8000; req.UserAgent = "MathisDynamicIsland/1.0";
+          byte[] bb = Encoding.UTF8.GetBytes(data);
+          using (System.IO.Stream s = req.GetRequestStream()) s.Write(bb, 0, bb.Length);
+          using (WebResponse r = req.GetResponse())
+          using (System.IO.StreamReader rd = new System.IO.StreamReader(r.GetResponseStream(), Encoding.UTF8)) txt = rd.ReadToEnd();
+        } catch (Exception ex) { string m = ex.Message; win.Dispatcher.BeginInvoke(new Action(delegate { Log("musique : " + m); })); }
+        win.Dispatcher.BeginInvoke(new Action(delegate { if (fini != null) fini(txt); }));
+      }));
+    }
+    void LoadQueue() {
+      if (queueBusy) return;
+      queueBusy = true; queueAt = DateTime.Now; queueTitle = E<TextBlock>("ETitle").Text;
+      Dictionary<string, object> body = new Dictionary<string, object>();
+      body["action"] = "file"; body["leger"] = true;
+      PostNox("/api/musique", body, delegate(string txt) {
+        queueBusy = false;
+        if (txt != null) ShowQueue(txt);
+      });
+    }
+    TextBlock QText(string t, double size, string color) {
+      TextBlock x = new TextBlock(); x.Text = t; x.FontSize = size; x.Foreground = Br(color); x.TextTrimming = TextTrimming.CharacterEllipsis;
+      return x;
+    }
+    void ShowQueue(string txt) {
+      Dictionary<string, object> r = null, m = null;
+      try { r = json.DeserializeObject(txt) as Dictionary<string, object>; } catch { }
+      if (r != null && r.ContainsKey("message")) m = r["message"] as Dictionary<string, object>;
+      if (m == null) return;
+      Panel q = E<Panel>("MQueue"), lists = E<Panel>("MLists");
+      q.Children.Clear(); lists.Children.Clear();
+      System.Collections.IEnumerable av = m.ContainsKey("a_venir") ? m["a_venir"] as System.Collections.IEnumerable : null;
+      if (av != null) foreach (object o in av) {
+        Dictionary<string, object> t = o as Dictionary<string, object>;
+        if (t == null || q.Children.Count == 6) continue;
+        StackPanel row = new StackPanel(); row.Margin = new Thickness(0, 0, 0, 7);
+        row.Children.Add(QText(Str(t.ContainsKey("titre") ? t["titre"] : null), 12.5, "#FFFFFF"));
+        row.Children.Add(QText(Str(t.ContainsKey("artiste") ? t["artiste"] : null), 11, "#8E8E93"));
+        q.Children.Add(row);
+      }
+      Vis("MQueueEmpty", q.Children.Count == 0);
+      System.Collections.IEnumerable pls = m.ContainsKey("playlists") ? m["playlists"] as System.Collections.IEnumerable : null;
+      if (pls != null) foreach (object o in pls) {
+        Dictionary<string, object> pd = o as Dictionary<string, object>;
+        if (pd == null || lists.Children.Count == 5) continue;
+        string nom = Str(pd.ContainsKey("nom") ? pd["nom"] : null), uri = Str(pd.ContainsKey("uri") ? pd["uri"] : null);
+        if (uri.Length == 0) continue;
+        Border chip = new Border(); chip.CornerRadius = new CornerRadius(10); chip.Padding = new Thickness(10, 6, 10, 6); chip.Margin = new Thickness(0, 0, 0, 5);
+        chip.Background = Br("#16FFFFFF"); chip.Cursor = Cursors.Hand;
+        chip.Child = QText(nom, 12.5, "#FFFFFF");
+        chip.MouseLeftButtonUp += delegate(object o2, MouseButtonEventArgs ev) {
+          ev.Handled = true;
+          Dictionary<string, object> body = new Dictionary<string, object>();
+          body["action"] = "playlist"; body["uri"] = uri; body["leger"] = true;
+          PostNox("/api/musique", body, delegate(string rep) {
+            if (rep == null) ShowToast("\uEC4F", "La lecture n'a pas démarré", "", Rgb("#FF453A"), -1, 2200);
+            else { ShowToast("\uEC4F", nom, "", Rgb("#FFFFFF"), -1, 1800); queueAt = DateTime.MinValue; }
+            Refresh();
+          });
+        };
+        lists.Children.Add(chip);
+      }
+      queueRev++; expKey = "";
+      Refresh();
     }
 
     // ---------------- Raccourcis Windows ----------------
@@ -4668,6 +4774,19 @@ if ($WindowsNotifs) { $workers += (Start-Worker $notifScript @($sync, @($NotifIg
                 </Grid></Button>
                 <Button x:Name="BNext" Style="{StaticResource IconBtn}" Padding="10" Margin="18,0,0,0"><Path Width="20" Height="16" Fill="White" Stretch="Uniform" Data="M18,0 L15.5,0 L15.5,16 L18,16 Z M0,0.6 L0,15.4 Q0,16.6 1,16 L13.6,8.9 Q14.5,8 13.6,7.1 L1,0 Q0,-0.6 0,0.6 Z"/></Button>
               </StackPanel>
+              <!-- 4.60 : vue agrandie seulement : titres à venir (file Spotify) et playlists -->
+              <Grid x:Name="MBig" Margin="0,12,0,0" Visibility="Collapsed">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <StackPanel>
+                  <TextBlock Text="À suivre" FontSize="11" Foreground="#8E8E93" Margin="0,0,0,6"/>
+                  <StackPanel x:Name="MQueue"/>
+                  <TextBlock x:Name="MQueueEmpty" Text="Rien dans la file" FontSize="12" Foreground="#636366" Visibility="Collapsed"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                  <TextBlock Text="Tes playlists" FontSize="11" Foreground="#8E8E93" Margin="0,0,0,6"/>
+                  <StackPanel x:Name="MLists"/>
+                </StackPanel>
+              </Grid>
             </StackPanel>
 
             <!-- Minuteur -->

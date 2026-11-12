@@ -46,4 +46,8 @@ Le dossier supprimé contient aussi tes réglages (`config.ps1`) et les journaux
 
 ## En cas de souci
 
+## Vue agrandie (deux écrans)
+
+Clic droit sur la pilule → **Agrandir la vue** : la vue qui s'ouvre au survol devient plus large, et Musique affiche en plus les titres à suivre et tes playlists. Elle se referme comme d'habitude quand la souris s'éloigne. Même menu pour revenir à la taille normale. Le choix n'est pas gardé après un redémarrage.
+
 Clic droit sur la pilule → **Ouvrir le journal**.
